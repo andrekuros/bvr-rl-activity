@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>BVR RL - Online Training</title>
+  <link rel="stylesheet" href="/static/style.css?v=4" />
+</head>
+<body>
+  <!-- AUTH VIEW -->
+  <div id="auth-view">
+    <div class="auth-wrap">
+      <h1>BVR Reinforcement Learning</h1>
+      <p class="sub">Online training arena. Log in or register with your class access code.</p>
+      <div class="tabs">
+        <button id="tab-login" class="primary" onclick="showAuth('login')">Login</button>
+        <button id="tab-register" onclick="showAuth('register')">Register</button>
+      </div>
+      <form id="login-form" class="auth-form active" onsubmit="return doLogin(event)">
+        <input id="login-name" placeholder="name" autocomplete="username" />
+        <input id="login-pw" type="password" placeholder="password" autocomplete="current-password" />
+        <button class="primary" type="submit">Login</button>
+        <div class="err" id="login-err"></div>
+      </form>
+      <form id="register-form" class="auth-form" onsubmit="return doRegister(event)">
+        <input id="reg-name" placeholder="choose a name" />
+        <input id="reg-pw" type="password" placeholder="choose a password" />
+        <input id="reg-code" placeholder="class access code" />
+        <button class="primary" type="submit">Create account</button>
+        <div class="err" id="reg-err"></div>
+      </form>
+    </div>
+  </div>
+
+  <!-- APP VIEW -->
+  <div id="app-view" class="hidden">
+    <header>
+      <h1>BVR Reinforcement Learning - Online Arena</h1>
+      <div class="userbox">
+        <span id="quota" class="quota-pill"></span>
+        <span id="whoami"></span>
+        <button onclick="doLogout()">Logout</button>
+      </div>
+    </header>
+    <nav class="navtabs">
+      <button class="active" data-view="train" onclick="showView('train')">Train</button>
+      <button data-view="runs" onclick="showView('runs')">My runs</button>
+      <button data-view="board" onclick="showView('board')">Leaderboard</button>
+      <button id="admin-tab" class="hidden" data-view="admin" onclick="showView('admin')">Admin</button>
+    </nav>
+
+    <!-- TRAIN -->
+    <section id="view-train" class="view active">
+      <div class="layout">
+        <aside class="sidebar">
+          <div class="panel">
+            <h2>Rewards &amp; Penalties</h2>
+            <p class="hint">The only thing you tune. Set any value to <b>0</b> to switch the signal off.</p>
+            <div class="field"><label>global_scale</label><input type="number" step="0.1" id="global_scale" /></div>
+            <h3>Events (sparse)</h3>
+            <div id="event-terms"></div>
+            <h3>Shaping (per step)</h3>
+            <div id="shaping-terms"></div>
+          </div>
+          <div class="panel">
+            <h2>Reference opponents</h2>
+            <p class="hint" id="enemy-hint">Optimized FSM agents B1 (strongest) through B10.</p>
+            <div id="enemy-list"></div>
+            <h2 style="margin-top:14px">Training</h2>
+            <div class="field"><label>steps</label><input type="number" step="10000" id="steps" /></div>
+            <p class="hint" id="steps-hint"></p>
+            <div class="buttons">
+              <button id="train-btn" class="primary">Queue training run</button>
+            </div>
+          </div>
+        </aside>
+        <main class="main">
+          <div class="panel">
+            <h2>Live run <small id="live-run"></small></h2>
+            <div class="metrics">
+              <div class="metric"><span id="m-progress">0%</span><label>progress</label></div>
+              <div class="metric"><span id="m-mission">-</span><label>avg score</label></div>
+              <div class="metric"><span id="m-reward">-</span><label>train reward</label></div>
+              <div class="metric"><span id="m-state">idle</span><label>state</label></div>
+              <div class="metric"><span id="m-eval-sims">-</span><label>eval runs</label></div>
+            </div>
+            <div class="progress"><div id="progress-bar"></div></div>
+            <div id="eval-progress" class="eval-progress hidden">
+              <div class="eval-progress-head">
+                <span id="eval-status">Evaluating...</span>
+                <span id="eval-count">0 / 0</span>
+              </div>
+              <div class="progress eval-bar"><div id="eval-progress-bar"></div></div>
+              <p id="eval-detail" class="hint"></p>
+            </div>
+          </div>
+          <div class="panel">
+            <h2>Live eval <small>avg score over all runs · 0.7×mission + 0.3×kill · monitoring only</small></h2>
+            <p id="eval-overall" class="eval-overall"></p>
+            <div id="match-grid" class="match-grid"></div>
+          </div>
+          <div class="panel">
+            <h2>Learning curve</h2>
+            <canvas id="curve" class="chart-canvas" width="720" height="280"></canvas>
+          </div>
+          <div id="post-run-panel" class="panel hidden">
+            <h2>Run complete <small id="post-run-label"></small></h2>
+            <p class="hint">Review your trained policy with statistical analysis and a tactical replay.</p>
+            <div class="run-tools">
+              <button class="primary" id="post-analysis-btn">Run analysis</button>
+              <select id="post-replay-enemy"></select>
+              <button id="post-replay-btn">Watch replay</button>
+              <button id="post-replay-stop" class="danger hidden">Stop replay</button>
+              <span id="post-replay-info" class="hint"></span>
+            </div>
+            <div id="post-analysis-out" class="analysis-out"></div>
+            <canvas id="post-replay" class="replay-canvas" width="420" height="420"></canvas>
+          </div>
+        </main>
+      </div>
+    </section>
+
+    <!-- MY RUNS -->
+    <section id="view-runs" class="view">
+      <div class="panel">
+        <h2>My runs <small>(submit your best - only one counts on the leaderboard)</small></h2>
+        <div id="runs-table"></div>
+      </div>
+      <div id="run-detail" class="panel hidden">
+        <h2>Run review <small id="run-detail-label"></small></h2>
+        <div class="run-tools">
+          <button class="primary" id="detail-analysis-btn">Run analysis</button>
+          <select id="detail-replay-enemy"></select>
+          <button id="detail-replay-btn">Watch replay</button>
+          <button id="detail-replay-stop" class="danger hidden">Stop replay</button>
+          <span id="detail-replay-info" class="hint"></span>
+        </div>
+        <div id="detail-analysis-out" class="analysis-out"></div>
+        <canvas id="detail-replay" class="replay-canvas" width="420" height="420"></canvas>
+      </div>
+    </section>
+
+    <!-- LEADERBOARD -->
+    <section id="view-board" class="view">
+      <div class="panel">
+        <h2>Competition leaderboard <small>score vs optimized references B1..B10</small></h2>
+        <div id="board-table"></div>
+      </div>
+    </section>
+
+    <!-- ADMIN -->
+    <section id="view-admin" class="view">
+      <div class="panel">
+        <h2>Class settings</h2>
+        <div class="field"><label>class_access_code</label><input id="cfg-class_access_code" /></div>
+        <div class="field"><label>runs_per_window</label><input type="number" id="cfg-runs_per_window" /></div>
+        <div class="field"><label>steps_per_run</label><input type="number" id="cfg-steps_per_run" /></div>
+        <div class="field"><label>window_hours</label><input type="number" step="0.5" id="cfg-window_hours" /></div>
+        <div class="field"><label>max_concurrent</label><input type="number" id="cfg-max_concurrent" /></div>
+        <div class="field"><label>registration_open (1/0)</label><input id="cfg-registration_open" /></div>
+        <div class="buttons"><button id="admin-save" class="primary">Save settings</button></div>
+        <p class="hint">max_concurrent = how many training processes run at once on the server.</p>
+      </div>
+      <div class="panel">
+        <h2>Final competition <small>(run at the end of class)</small></h2>
+        <p class="hint">Runs a student-vs-student round-robin, compares it to the static (FSM) results, and correlates each reward/penalty choice with the outcomes.</p>
+        <div class="buttons" style="flex-direction:row;gap:10px">
+          <button id="final-btn" class="primary">Run final competition</button>
+          <span id="final-progress" class="hint"></span>
+        </div>
+        <div id="final-out"></div>
+      </div>
+      <div class="panel">
+        <h2>All runs</h2>
+        <div id="admin-runs"></div>
+      </div>
+    </section>
+  </div>
+
+  <script src="/static/charts.js?v=1"></script>
+  <script src="/static/app.js?v=9"></script>
+</body>
+</html>

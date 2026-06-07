@@ -1,0 +1,92 @@
+{
+  "B1": {
+    "shot_frac": 1.0725511764226916,
+    "crank_frac": 1.0158033430450655,
+    "break_dist": 38.001758339150896,
+    "aggressive": false,
+    "can_fire": true,
+    "score": 9.5333,
+    "rank": 1
+  },
+  "B2": {
+    "shot_frac": 1.01524232994418,
+    "crank_frac": 0.9485994484791449,
+    "break_dist": 35.72972942944594,
+    "aggressive": false,
+    "can_fire": true,
+    "score": 9.5,
+    "rank": 2
+  },
+  "B3": {
+    "shot_frac": 1.0722311141902061,
+    "crank_frac": 1.017906687486918,
+    "break_dist": 38.41684848459801,
+    "aggressive": false,
+    "can_fire": true,
+    "score": 9.4667,
+    "rank": 3
+  },
+  "B4": {
+    "shot_frac": 1.1132284890722157,
+    "crank_frac": 1.0877412202796237,
+    "break_dist": 35.59664379805116,
+    "aggressive": true,
+    "can_fire": true,
+    "score": 9.4,
+    "rank": 4
+  },
+  "B5": {
+    "shot_frac": 1.1484383653991297,
+    "crank_frac": 1.0243407777328428,
+    "break_dist": 39.581097482432455,
+    "aggressive": false,
+    "can_fire": true,
+    "score": 9.2667,
+    "rank": 5
+  },
+  "B6": {
+    "shot_frac": 1.2,
+    "crank_frac": 0.9517322504334741,
+    "break_dist": 43.72913372452702,
+    "aggressive": true,
+    "can_fire": true,
+    "score": 8.8,
+    "rank": 6
+  },
+  "B7": {
+    "shot_frac": 1.187160898050529,
+    "crank_frac": 1.0265118121905572,
+    "break_dist": 39.593219854193656,
+    "aggressive": true,
+    "can_fire": true,
+    "score": 8.65,
+    "rank": 7
+  },
+  "B8": {
+    "shot_frac": 1.2,
+    "crank_frac": 0.9676290731077896,
+    "break_dist": 42.479731885687634,
+    "aggressive": true,
+    "can_fire": true,
+    "score": 8.6,
+    "rank": 8
+  },
+  "B9": {
+    "shot_frac": 1.0084577079147885,
+    "crank_frac": 0.9766931304157526,
+    "break_dist": 35.80429575200731,
+    "aggressive": false,
+    "can_fire": true,
+    "score": 8.5667,
+    "rank": 9
+  },
+  "B10": {
+    "shot_frac": 1.2,
+    "crank_frac": 0.9541387079654855,
+    "break_dist": 44.411344001377536,
+    "aggressive": true,
+    "can_fire": true,
+    "score": 8.4833,
+    "rank": 10
+  }
+}

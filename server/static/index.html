@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>BVR Reinforcement Learning Lab</title>
+  <link rel="stylesheet" href="/static/style.css?v=4" />
+</head>
+<body>
+  <header>
+    <h1>BVR Reinforcement Learning Lab</h1>
+    <div id="status" class="status">idle</div>
+  </header>
+
+  <div class="layout">
+    <!-- LEFT: configuration -->
+    <aside class="sidebar">
+      <h2>Rewards &amp; Penalties</h2>
+      <p class="hint">The only thing you tune. Set any value to <b>0</b> to switch the signal off.</p>
+
+      <div class="field">
+        <label>global_scale</label>
+        <input type="number" step="0.1" id="global_scale" />
+      </div>
+
+      <h3>Events (sparse)</h3>
+      <div id="event-terms"></div>
+
+      <h3>Shaping (per step)</h3>
+      <div id="shaping-terms"></div>
+
+      <h2>Reference opponents</h2>
+      <p class="hint" id="enemy-hint">Optimized FSM agents B1 (strongest) through B10. Train and compete against these.</p>
+      <div id="enemy-list"></div>
+      <div class="field">
+        <label>random_enemy_prob</label>
+        <input type="number" step="0.05" min="0" max="1" id="random_enemy_prob" />
+      </div>
+
+      <h2>Training</h2>
+      <div class="field">
+        <label>timesteps</label>
+        <input type="number" step="1000" id="train_timesteps" />
+      </div>
+      <label class="check"><input type="checkbox" id="quick" /> quick run (8k steps)</label>
+
+      <div class="buttons">
+        <button id="save-btn">Save Config</button>
+        <button id="train-btn" class="primary">Start Training</button>
+        <button id="stop-btn" class="danger">Stop</button>
+      </div>
+    </aside>
+
+    <!-- RIGHT: live views -->
+    <main class="main">
+      <section class="panel">
+        <div class="metrics">
+          <div class="metric"><span id="m-progress">0%</span><label>progress</label></div>
+          <div class="metric"><span id="m-winrate">-</span><label>avg score</label></div>
+          <div class="metric"><span id="m-reward">-</span><label>train reward</label></div>
+          <div class="metric"><span id="m-timesteps">0</span><label>timesteps</label></div>
+          <div class="metric"><span id="m-eval-sims">-</span><label>eval runs</label></div>
+        </div>
+        <div class="progress"><div id="progress-bar"></div></div>
+        <div id="eval-progress" class="eval-progress hidden">
+          <div class="eval-progress-head">
+            <span id="eval-status">Evaluating...</span>
+            <span id="eval-count">0 / 0</span>
+          </div>
+          <div class="progress eval-bar"><div id="eval-progress-bar"></div></div>
+          <p id="eval-detail" class="hint"></p>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>Live eval <small>avg score over all runs · 0.7×mission + 0.3×kill · monitoring only</small></h2>
+        <p id="eval-overall" class="eval-overall"></p>
+        <div id="match-grid" class="match-grid"></div>
+      </section>
+
+      <section class="panel">
+          <h2>Learning curves</h2>
+          <canvas id="curve" class="chart-canvas" width="720" height="280"></canvas>
+      </section>
+
+      <section class="panel">
+        <h2>Real-time replay</h2>
+        <div class="replay-controls">
+          <select id="replay-enemy"></select>
+          <button id="replay-btn">Watch trained model</button>
+          <span id="replay-info" class="hint"></span>
+        </div>
+        <canvas id="replay" width="460" height="460"></canvas>
+      </section>
+
+      <section class="panel">
+        <h2>Statistical analysis</h2>
+        <button id="analysis-btn">Run analysis on saved model</button>
+        <div id="analysis-out" class="analysis-out"></div>
+      </section>
+    </main>
+  </div>
+
+  <script src="/static/charts.js?v=1"></script>
+  <script src="/static/app.js?v=9"></script>
+</body>
+</html>

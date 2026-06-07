@@ -1,0 +1,12 @@
+{
+  "enemies": [
+    "B1"
+  ],
+  "random_enemy_prob": 0.0,
+  "max_cycles": 260,
+  "train_timesteps": 200000,
+  "seed": 0,
+  "enemy_sampling": "round_robin",
+  "eval_episodes_per_enemy": 1,
+  "eval_every_rollouts": 2
+}

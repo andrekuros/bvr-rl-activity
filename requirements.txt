@@ -1,0 +1,9 @@
+gymnasium>=0.29.1
+stable-baselines3>=2.3.0
+torch>=2.1.0
+numpy>=1.24,<2.1
+matplotlib>=3.7
+fastapi>=0.110
+uvicorn[standard]>=0.27
+python-multipart>=0.0.9
+requests>=2.31

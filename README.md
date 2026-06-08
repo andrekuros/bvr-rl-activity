@@ -9,6 +9,13 @@ neural network and the learning algorithm are fixed.** Your job is to design the
 *reward function*: decide what the agent should be rewarded and penalized for.
 Then you submit your trained model to the class competition.
 
+## Documentation
+
+| Guide | Audience |
+|-------|----------|
+| **[docs/STUDENT_GUIDE.md](docs/STUDENT_GUIDE.md)** | Students — what each UI element means, how to train, submit, and interpret results |
+| **[docs/SYSTEM_AND_CONFIGURATION.md](docs/SYSTEM_AND_CONFIGURATION.md)** | Instructors — architecture, config files, deployment, scoring, admin |
+
 ---
 
 ## What you may change vs. what is locked
@@ -195,6 +202,7 @@ Events: `mission_completed`, `hit_enemy`, `was_hit`, `fire_missile`,
 
 ```
 bvr-rl-activity/
+  docs/          STUDENT_GUIDE.md, SYSTEM_AND_CONFIGURATION.md
   config/        rewards.json, scenario.json, reference_enemies.json (B1..B10)
   bvr/           env, enemies, rewards, policy(LOCKED), train, evaluate, analysis, fsm_optimize, tournament, submit
   server/        local single-user dashboard (backend + static UI)

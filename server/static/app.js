@@ -6,6 +6,8 @@ const history = { t: [], reward: [], winrate: [] };
 let evalLiveEpisodes = [];
 let matchEpisodes = [];
 let matchIdx = 0;
+let matchHold = 0;
+const MATCH_HOLD_FRAMES = 55;
 const replayBuffer = [];
 let replayIdx = 0;
 let replayPlaying = false;
@@ -30,32 +32,25 @@ async function loadConfig() {
   CONFIG = await cfgRes.json();
   CONFIG.enemy_types = catalog.names;
   CONFIG.enemy_catalog = catalog;
-  const r = CONFIG.rewards;
-  $("global_scale").value = r.global_scale;
   $("random_enemy_prob").value = CONFIG.scenario.random_enemy_prob ?? 0;
   $("train_timesteps").value = CONFIG.scenario.train_timesteps ?? 200000;
-
-  renderTerms("event-terms", CONFIG.reward_terms.event, r);
-  renderTerms("shaping-terms", CONFIG.reward_terms.shaping, r);
+  RewardEditor.renderAll(CONFIG.reward_editor, CONFIG.rewards);
 
   const hint = $("enemy-hint");
   if (hint) {
     hint.textContent = (CONFIG.enemy_catalog && CONFIG.enemy_catalog.mode === "reference")
-      ? "Optimized FSM references B1 (strongest) through B10. All are selected for training by default."
-      : "Pick which hand-coded opponents to train against.";
+      ? "Click bubbles to toggle. Similar FSM profiles cluster — color = difficulty score."
+      : "Click bubbles to toggle opponents. Position = offense vs defense style.";
   }
 
-  const list = $("enemy-list");
-  list.innerHTML = "";
   const sel = $("replay-enemy");
   sel.innerHTML = "";
   const active = new Set(CONFIG.scenario.enemies || CONFIG.enemy_types || []);
+  const initial = active.size ? [...active] : (CONFIG.enemy_types || []);
+  if (CONFIG.enemy_types && CONFIG.enemy_types.length) {
+    EnemyPicker.render("enemy-picker", catalog, { selected: initial });
+  }
   (CONFIG.enemy_types || []).forEach((e) => {
-    const checked = active.has(e) || active.size === 0;
-    const wrap = document.createElement("label");
-    wrap.className = "enemy-item";
-    wrap.innerHTML = `<input type="checkbox" value="${e}" ${checked ? "checked" : ""}/> ${enemyLabel(e, catalog)}`;
-    list.appendChild(wrap);
     const opt = document.createElement("option");
     opt.value = e; opt.textContent = enemyLabel(e, catalog);
     sel.appendChild(opt);
@@ -63,30 +58,13 @@ async function loadConfig() {
 }
 
 function renderTerms(containerId, terms, values) {
-  const c = $(containerId);
-  c.innerHTML = "";
-  terms.forEach((term) => {
-    const row = document.createElement("div");
-    row.className = "term-row" + (Number(values[term]) === 0 ? " disabled" : "");
-    row.innerHTML = `
-      <label>${term}</label>
-      <input type="number" step="0.1" data-term="${term}" value="${values[term]}" />
-      <button class="zero" title="disable this signal">0</button>`;
-    const input = row.querySelector("input");
-    input.addEventListener("input", () => row.classList.toggle("disabled", Number(input.value) === 0));
-    row.querySelector(".zero").addEventListener("click", () => {
-      input.value = 0; row.classList.add("disabled");
-    });
-    c.appendChild(row);
-  });
+  /* legacy — reward editor handles rendering in loadConfig */
 }
 
 function gatherConfig() {
-  const rewards = { global_scale: Number($("global_scale").value) };
-  document.querySelectorAll("[data-term]").forEach((inp) => {
-    rewards[inp.dataset.term] = Number(inp.value);
-  });
-  const enemies = Array.from(document.querySelectorAll("#enemy-list input:checked")).map((c) => c.value);
+  const rewards = RewardEditor.gather();
+  let enemies = EnemyPicker.getSelected();
+  if (!enemies.length && CONFIG && CONFIG.enemy_types) enemies = [...CONFIG.enemy_types];
   const scenario = {
     enemies,
     random_enemy_prob: Number($("random_enemy_prob").value),
@@ -265,7 +243,7 @@ function applyEvalSummary(ev) {
   $("m-eval-sims").textContent = `${s.finished}/${s.total_simulations}`;
   if ($("eval-overall")) {
     $("eval-overall").textContent =
-      `Average score: ${fmtScore(score)} (0.7×mission + 0.3×kill over ${s.total_simulations} runs) · monitoring only`;
+      `Average score: ${fmtScore(score)} (0.6×mission + 0.25×kill + 0.15×missile eff. over ${s.total_simulations} runs) · monitoring only`;
   }
   hideEvalProgress();
 }
@@ -353,6 +331,16 @@ function drawFrame(ctx, frame, w, h) {
   });
   if (b) drawAircraft(ctx, b, "#4c9be8", arena, w, h);
   if (rd) drawAircraft(ctx, rd, "#e8624c", arena, w, h);
+  const res = frame.result;
+  if (res && res !== "pending") {
+    ctx.fillStyle = "rgba(0,0,0,0.55)";
+    ctx.fillRect(0, h * 0.5 - 16, w, 32);
+    ctx.fillStyle = res === "mission" ? "#5ec27a" : res === "shot_down" ? "#e8624c" : "#8b97ad";
+    ctx.font = "bold 13px Segoe UI, sans-serif";
+    ctx.textAlign = "center";
+    ctx.fillText(String(res).replace(/_/g, " "), w / 2, h * 0.5 + 5);
+    ctx.textAlign = "left";
+  }
 }
 
 function drawAircraft(ctx, ac, color, arena, w, h) {
@@ -377,20 +365,30 @@ function tickVisuals() {
     const withFrames = matchEpisodes.filter((e) => e && e.frames && e.frames.length);
     if (withFrames.length) {
       const maxLen = Math.max(...withFrames.map((e) => e.frames.length));
+      const frameIdx = Math.min(matchIdx, maxLen - 1);
       matchEpisodes.forEach((ep, i) => {
         const cv = $("mc" + i);
         if (!cv || !ep || !ep.frames || !ep.frames.length) return;
-        const f = ep.frames[Math.min(matchIdx, ep.frames.length - 1)];
-        drawFrame(cv.getContext("2d"), f, cv.width, cv.height);
+        drawFrame(cv.getContext("2d"), ep.frames[frameIdx], cv.width, cv.height);
       });
-      matchIdx = (matchIdx + 1) % Math.max(maxLen, 1);
+      if (matchIdx < maxLen - 1) {
+        matchIdx++;
+        matchHold = 0;
+      } else {
+        matchHold++;
+        if (matchHold > MATCH_HOLD_FRAMES) {
+          matchIdx = 0;
+          matchHold = 0;
+        }
+      }
     }
   }
   if (replayBuffer.length) {
     const cv = $("replay");
-    if (replayIdx < replayBuffer.length) {
-      drawFrame(cv.getContext("2d"), replayBuffer[replayIdx], cv.width, cv.height);
-      replayIdx++;
+    if (cv) {
+      const idx = Math.min(replayIdx, replayBuffer.length - 1);
+      drawFrame(cv.getContext("2d"), replayBuffer[idx], cv.width, cv.height);
+      if (replayIdx < replayBuffer.length - 1) replayIdx++;
     }
   }
   setTimeout(tickVisuals, 90);

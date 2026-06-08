@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>BVR Reinforcement Learning Lab</title>
-  <link rel="stylesheet" href="/static/style.css?v=4" />
+  <link rel="stylesheet" href="/static/style.css?v=6" />
 </head>
 <body>
   <header>
@@ -16,22 +16,27 @@
     <!-- LEFT: configuration -->
     <aside class="sidebar">
       <h2>Rewards &amp; Penalties</h2>
-      <p class="hint">The only thing you tune. Set any value to <b>0</b> to switch the signal off.</p>
+      <p class="hint" id="reward-editor-hint">Slider or type a value. <b>+</b> = reward, <b>−</b> = penalty, <b>0</b> = off. Hover a name for help.</p>
 
-      <div class="field">
-        <label>global_scale</label>
-        <input type="number" step="0.1" id="global_scale" />
-      </div>
+      <div id="global-scale-wrap"></div>
 
-      <h3>Events (sparse)</h3>
+      <p class="rw-section">Events (sparse)</p>
       <div id="event-terms"></div>
 
-      <h3>Shaping (per step)</h3>
+      <p class="rw-section">Shaping (per step)</p>
       <div id="shaping-terms"></div>
 
-      <h2>Reference opponents</h2>
-      <p class="hint" id="enemy-hint">Optimized FSM agents B1 (strongest) through B10. Train and compete against these.</p>
-      <div id="enemy-list"></div>
+      <h2>Training opponents</h2>
+      <p class="hint" id="enemy-hint">Click bubbles to toggle. Similar FSM profiles cluster together.</p>
+      <div class="enemy-toolbar">
+        <button type="button" id="enemy-all">All</button>
+        <button type="button" id="enemy-none">None</button>
+        <span id="enemy-count" class="hint"></span>
+      </div>
+      <div id="enemy-picker" class="enemy-map-wrap">
+        <canvas id="enemy-map" class="enemy-map" width="340" height="220"></canvas>
+      </div>
+      <p class="enemy-legend"><i class="easy"></i> easier &nbsp; <i class="hard"></i> harder · blue ring = selected</p>
       <div class="field">
         <label>random_enemy_prob</label>
         <input type="number" step="0.05" min="0" max="1" id="random_enemy_prob" />
@@ -73,7 +78,7 @@
       </section>
 
       <section class="panel">
-        <h2>Live eval <small>avg score over all runs · 0.7×mission + 0.3×kill · monitoring only</small></h2>
+        <h2>Live eval <small>avg score · 0.6×mission + 0.25×kill + 0.15×missile eff. · monitoring only</small></h2>
         <p id="eval-overall" class="eval-overall"></p>
         <div id="match-grid" class="match-grid"></div>
       </section>
@@ -102,6 +107,8 @@
   </div>
 
   <script src="/static/charts.js?v=1"></script>
-  <script src="/static/app.js?v=9"></script>
+  <script src="/static/reward-editor.js?v=4"></script>
+  <script src="/static/enemy-picker.js?v=1"></script>
+  <script src="/static/app.js?v=13"></script>
 </body>
 </html>

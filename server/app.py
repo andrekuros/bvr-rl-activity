@@ -104,11 +104,12 @@ async def get_enemies():
 async def get_config():
     rewards, scenario = load_configs()
     catalog = enemy_catalog()
+    editor = rewards_mod.reward_editor_payload()
+    editor["defaults"] = dict(rewards)
     return {
         "rewards": rewards,
         "scenario": scenario,
-        "reward_terms": {"event": rewards_mod.EVENT_TERMS, "shaping": rewards_mod.SHAPING_TERMS},
-        "defaults": rewards_mod.DEFAULT_REWARDS,
+        "reward_editor": editor,
         "enemy_types": catalog["names"],
         "enemy_catalog": catalog,
         "busy": hub.is_busy(),
@@ -119,6 +120,8 @@ async def get_config():
 @app.post("/api/config")
 async def save_config(payload: Dict):
     rewards = payload.get("rewards", {})
+    editor = rewards_mod.reward_editor_payload()
+    rewards = rewards_mod.clamp_rewards(rewards, editor["ranges"])
     scenario = payload.get("scenario", {})
     rewards_mod.save_rewards(os.path.join(DEFAULT_CONFIG_DIR, "rewards.json"), rewards)
     current = load_scenario()

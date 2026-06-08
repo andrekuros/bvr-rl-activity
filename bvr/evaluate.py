@@ -15,7 +15,8 @@ from stable_baselines3 import PPO
 
 from . import rewards as rewards_mod
 from .env import BVREnv, N_MISSILES
-from .enemies import SELECTABLE_TYPES, training_enemy_pool
+from .enemies import SELECTABLE_TYPES, eval_enemy_pool, training_enemy_pool
+from .scoring import SCORE_FORMULA_LABEL, competition_score
 from .train import DEFAULT_MODEL_PATH, load_configs
 
 
@@ -67,8 +68,9 @@ def evaluate_model(model_path: str, reward_config: Optional[Dict] = None,
                    episodes_per_enemy: int = 10, seed: int = 1000) -> Dict:
     """Aggregate performance across enemies. Returns per-enemy and overall stats.
 
-    The competition `score` is the overall win rate (0..1); ties broken by mean
-    reward and missile efficiency.
+    The competition `score` (0..1) is 0.6*mission_rate + 0.25*kill_rate +
+    0.15*missile_efficiency, so combat effectiveness and not wasting missiles
+    both count on top of the primary mission objective.
     """
     if reward_config is None or scenario is None:
         r, s = load_configs()
@@ -100,9 +102,7 @@ def evaluate_model(model_path: str, reward_config: Optional[Dict] = None,
     fired = float(np.sum([e["missiles_used"] for e in all_eps]))
     kills = float(np.sum([e["killed_enemy"] for e in all_eps]))
     efficiency = round(kills / fired, 3) if fired > 0 else 0.0
-    # Competition score: mission accomplishment is primary, with a kill-rate
-    # bonus so combat effectiveness still matters (0..1).
-    score = 0.7 * mission_rate + 0.3 * kill_rate
+    score = competition_score(mission_rate, kill_rate, efficiency)
     return {
         "score": round(score, 4),
         "mission_rate": round(mission_rate, 3),
@@ -132,14 +132,14 @@ def main():
     reward_config = scenario = enemies = None
     if args.locked:
         reward_config = dict(rewards_mod.DEFAULT_REWARDS)
-        scenario = {"enemies": list(training_enemy_pool()), "random_enemy_prob": 0.0, "max_cycles": 260}
-        enemies = list(training_enemy_pool())
+        scenario = {"enemies": list(eval_enemy_pool()), "random_enemy_prob": 0.0, "max_cycles": 260}
+        enemies = list(eval_enemy_pool())
     stats = evaluate_model(args.model, reward_config=reward_config, scenario=scenario,
                            enemies=enemies, episodes_per_enemy=args.episodes)
     if args.json:
         print(_json.dumps(stats))
         return
-    print(f"Score: {stats['score']:.1%}  (0.7*mission + 0.3*kill)")
+    print(f"Score: {stats['score']:.1%}  ({SCORE_FORMULA_LABEL})")
     print(f"Mission rate: {stats['mission_rate']:.0%}  |  kill rate: {stats['kill_rate']:.0%}  "
           f"|  survival: {stats['survival_rate']:.0%}")
     print(f"Mean reward: {stats['mean_reward']:.2f}  |  missile efficiency: {stats['missile_efficiency']}")

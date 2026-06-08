@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import shutil
 import subprocess
 import sys
 import threading
@@ -29,12 +30,13 @@ from typing import Dict, List, Optional, Set
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from fastapi import Cookie, FastAPI, Request, WebSocket, WebSocketDisconnect  # noqa: E402
+from fastapi import Body, Cookie, FastAPI, Request, WebSocket, WebSocketDisconnect  # noqa: E402
 from fastapi.responses import FileResponse, JSONResponse, Response  # noqa: E402
 from fastapi.staticfiles import StaticFiles  # noqa: E402
 
 from bvr import rewards as rewards_mod  # noqa: E402
-from bvr.enemies import SELECTABLE_TYPES, enemy_catalog, reference_types, training_enemy_pool  # noqa: E402
+from bvr.enemies import (SELECTABLE_TYPES, enemy_catalog, eval_enemy_pool,  # noqa: E402
+                         reference_types, training_enemy_pool)
 from online_server import db  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -47,12 +49,29 @@ ANALYSIS_DIR = os.path.join(db.DATA_DIR, "analysis")
 
 
 def _allowed_enemies():
-    return set(training_enemy_pool()) | set(SELECTABLE_TYPES) | set(reference_types())
+    return (set(training_enemy_pool()) | set(SELECTABLE_TYPES)
+            | set(reference_types()) | set(eval_enemy_pool()))
+
+
+def _cleanup_run_files(run_id: int, run: Dict) -> None:
+    """Remove on-disk artifacts for a deleted run."""
+    for folder in (os.path.join(JOBS_DIR, f"run_{run_id}"),
+                   os.path.join(ANALYSIS_DIR, f"run_{run_id}")):
+        if os.path.isdir(folder):
+            shutil.rmtree(folder, ignore_errors=True)
+    model = run.get("model_path")
+    if model and os.path.isfile(model):
+        try:
+            os.remove(model)
+        except OSError:
+            pass
 
 
 def _user_run(user: Dict, run_id: int) -> Optional[Dict]:
     run = db.get_run(run_id)
-    if run is None or run["user_id"] != user["id"]:
+    if run is None:
+        return None
+    if run["user_id"] != user["id"] and not user.get("is_admin"):
         return None
     return run
 
@@ -199,11 +218,14 @@ class JobManager:
             rewards = json.loads(run["rewards_json"])
             rewards_mod.save_rewards(os.path.join(job_dir, "rewards.json"), rewards)
             enemies = json.loads(run["enemies"]) or list(training_enemy_pool())
+            enemy_weights = json.loads(run["enemy_weights_json"]) if run.get("enemy_weights_json") else {}
             scenario = {"enemies": enemies, "random_enemy_prob": 0.0,
-                        "enemy_sampling": "round_robin",
+                        "enemy_sampling": "weighted" if enemy_weights else "round_robin",
+                        "enemy_weights": enemy_weights,
                         "max_cycles": 260, "train_timesteps": run["steps"], "seed": 0,
                         "eval_episodes_per_enemy": int(db.get_config().get("eval_episodes_per_enemy", 1)),
-                        "eval_every_rollouts": int(db.get_config().get("eval_every_rollouts", 2))}
+                        "eval_every_rollouts": int(db.get_config().get("eval_every_rollouts", 8)),
+                        "live_eval_max_enemies": int(db.get_config().get("live_eval_max_enemies", 4))}
             with open(os.path.join(job_dir, "scenario.json"), "w", encoding="utf-8") as f:
                 json.dump(scenario, f)
 
@@ -221,6 +243,7 @@ class JobManager:
                 self.active[run_id] = proc
 
             tail: List[str] = []
+            curve = {"t": [], "reward": [], "score": []}
             for line in proc.stdout:
                 line = line.strip()
                 if not line:
@@ -232,6 +255,10 @@ class JobManager:
                     tail[:] = tail[-8:]
                     continue
                 event["run_id"] = run_id
+                if event.get("type") == "update" and "timesteps" in event:
+                    curve["t"].append(int(event["timesteps"]))
+                    curve["reward"].append(round(float(event.get("ep_rew_mean", 0.0)), 3))
+                    curve["score"].append(round(float(event.get("eval_score", event.get("winrate", 0.0))), 3))
                 hub.push(user_id, event)
             proc.wait()
 
@@ -249,8 +276,9 @@ class JobManager:
 
             # --- evaluation subprocess (locked competition scoring) -------
             hub.push(user_id, {"type": "status", "run_id": run_id, "state": "evaluating"})
+            locked_eps = int(db.get_config().get("locked_eval_episodes_per_enemy", 30))
             ev_cmd = [sys.executable, "-m", "bvr.evaluate", "--model", model_path,
-                      "--json", "--locked", "--episodes", "12"]
+                      "--json", "--locked", "--episodes", str(locked_eps)]
             out = subprocess.run(ev_cmd, cwd=PROJECT_ROOT, stdout=subprocess.PIPE,
                                  stderr=subprocess.PIPE, text=True)
             stats = json.loads(out.stdout.strip().splitlines()[-1])
@@ -258,8 +286,35 @@ class JobManager:
                           score=stats["score"], mission_rate=stats["mission_rate"],
                           kill_rate=stats["kill_rate"], survival_rate=stats["survival_rate"],
                           mean_reward=stats["mean_reward"],
-                          missile_efficiency=stats["missile_efficiency"])
+                          missile_efficiency=stats["missile_efficiency"],
+                          curve_json=json.dumps(curve), analysis_status="pending")
             hub.push(user_id, {"type": "done", "run_id": run_id, "stats": stats})
+
+            # --- automatic post-run analysis report (in-process) ----------
+            hub.push(user_id, {"type": "report", "run_id": run_id, "state": "pending"})
+            try:
+                run_row = db.get_run(run_id)
+                rewards, scenario = _load_run_config(run_id, run_row)
+                # Analyse against the full locked opponent set (same as scoring),
+                # not just the opponents the student trained on.
+                scenario = {**scenario, "enemies": list(eval_enemy_pool())}
+                out_dir = os.path.join(ANALYSIS_DIR, f"run_{run_id}")
+                from bvr.analysis import analyze_model
+                analysis_eps = int(db.get_config().get("analysis_episodes_per_enemy", 10))
+                result = analyze_model(model_path, reward_config=rewards, scenario=scenario,
+                                       out_dir=out_dir, episodes_per_enemy=analysis_eps)
+                report = {
+                    "stats": result["stats"],
+                    "plots": {name: os.path.basename(path)
+                              for name, path in result["plots"].items()},
+                }
+                db.update_run(run_id, analysis_json=json.dumps(report), analysis_status="ready")
+                hub.push(user_id, {"type": "report", "run_id": run_id, "state": "ready"})
+            except Exception as exc:
+                db.update_run(run_id, analysis_status="error",
+                              analysis_json=json.dumps({"error": str(exc)[:400]}))
+                hub.push(user_id, {"type": "report", "run_id": run_id, "state": "error",
+                                   "message": str(exc)[:300]})
         except Exception as exc:
             with self.lock:
                 self.active.pop(run_id, None)
@@ -288,6 +343,9 @@ def quota_info(user_id: int) -> Dict:
         "remaining": max(0, per_window - used),
         "window_hours": window_hours,
         "steps_per_run": int(cfg["steps_per_run"]),
+        "steps_editable": cfg.get("steps_editable", "0") == "1",
+        "locked_eval_episodes_per_enemy": int(cfg.get("locked_eval_episodes_per_enemy", 30)),
+        "analysis_episodes_per_enemy": int(cfg.get("analysis_episodes_per_enemy", 10)),
     }
 
 
@@ -373,11 +431,11 @@ async def me(sid: Optional[str] = Cookie(None)):
         return {"authenticated": False}
     return {
         "authenticated": True,
+        "id": user["id"],
         "name": user["name"],
         "is_admin": bool(user["is_admin"]),
         "quota": quota_info(user["id"]),
-        "reward_terms": {"event": rewards_mod.EVENT_TERMS, "shaping": rewards_mod.SHAPING_TERMS},
-        "defaults": rewards_mod.DEFAULT_REWARDS,
+        "reward_editor": rewards_mod.reward_editor_payload(db.get_config()),
         "enemy_types": enemy_catalog()["names"],
         "enemy_catalog": enemy_catalog(),
     }
@@ -389,7 +447,8 @@ async def my_runs(sid: Optional[str] = Cookie(None)):
     user = current_user(sid)
     if user is None:
         return JSONResponse({"error": "auth"}, status_code=401)
-    return {"runs": db.list_user_runs(user["id"]), "quota": quota_info(user["id"])}
+    runs = db.all_runs(100) if user["is_admin"] else db.list_user_runs(user["id"])
+    return {"runs": runs, "quota": quota_info(user["id"]), "is_admin": bool(user["is_admin"])}
 
 
 @app.post("/api/train")
@@ -401,16 +460,62 @@ async def start_train(payload: Dict, sid: Optional[str] = Cookie(None)):
     if q["remaining"] <= 0:
         return JSONResponse({"ok": False, "error": "Quota exhausted for this time window."}, status_code=429)
 
-    rewards = {"global_scale": float(payload.get("rewards", {}).get("global_scale", 1.0))}
+    rewards_in = payload.get("rewards", {})
+    platform_cfg = db.get_config()
+    editor = rewards_mod.reward_editor_payload(platform_cfg)
+    defaults = editor["defaults"]
+    ranges = editor["ranges"]
+    rewards = {"global_scale": float(rewards_in.get("global_scale", defaults["global_scale"]))}
     for k in rewards_mod.REWARD_TERMS:
-        rewards[k] = float(payload.get("rewards", {}).get(k, rewards_mod.DEFAULT_REWARDS[k]))
-    enemies = [e for e in payload.get("enemies", []) if e in _allowed_enemies()] or list(training_enemy_pool())
-    steps = min(int(payload.get("steps", q["steps_per_run"])), q["steps_per_run"])
+        rewards[k] = float(rewards_in.get(k, defaults.get(k, 0.0)))
+    rewards = rewards_mod.clamp_rewards(rewards, ranges)
+    allowed = _allowed_enemies()
+    enemies = [e for e in payload.get("enemies", []) if e in allowed] or list(training_enemy_pool())
+    # Per-enemy priority (0..1) controlling how often each opponent appears.
+    raw_weights = payload.get("enemy_weights") or {}
+    enemy_weights = {}
+    for e in enemies:
+        try:
+            enemy_weights[e] = max(0.0, min(1.0, float(raw_weights.get(e, 1.0))))
+        except (TypeError, ValueError):
+            enemy_weights[e] = 1.0
+    # Drop opponents whose priority is 0 (treated as deselected).
+    enemies = [e for e in enemies if enemy_weights.get(e, 1.0) > 0] or list(training_enemy_pool())
+    cfg = db.get_config()
+    max_steps = int(cfg.get("steps_per_run", q["steps_per_run"]))
+    if cfg.get("steps_editable", "0") == "1":
+        steps = min(int(payload.get("steps", max_steps)), max_steps)
+    else:
+        steps = max_steps
     steps = max(2000, steps)
 
-    run_id = db.create_run(user["id"], steps, json.dumps(rewards), json.dumps(enemies))
+    run_id = db.create_run(user["id"], steps, json.dumps(rewards), json.dumps(enemies),
+                           json.dumps(enemy_weights))
     jobs.enqueue(run_id)
-    return {"ok": True, "run_id": run_id, "steps": steps, "quota": quota_info(user["id"])}
+    return {
+        "ok": True, "run_id": run_id, "run_uid": f"R{run_id:06d}",
+        "steps": steps, "quota": quota_info(user["id"]),
+    }
+
+
+@app.get("/api/run/{run_id}")
+async def get_run(run_id: int, sid: Optional[str] = Cookie(None)):
+    user = current_user(sid)
+    if user is None:
+        return JSONResponse({"error": "auth"}, status_code=401)
+    run = _user_run(user, run_id)
+    if run is None:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    model_ok = bool(run.get("model_path")) and os.path.exists(run["model_path"])
+    return {
+        "run": {
+            "id": run["id"],
+            "status": run["status"],
+            "steps": run["steps"],
+            "score": run.get("score"),
+            "model_ready": model_ok,
+        }
+    }
 
 
 @app.post("/api/run/{run_id}/stop")
@@ -435,29 +540,109 @@ async def submit_run(run_id: int, sid: Optional[str] = Cookie(None)):
     return {"ok": True}
 
 
-@app.post("/api/run/{run_id}/analysis")
-async def analyze_run(run_id: int, sid: Optional[str] = Cookie(None)):
+def _report_context(user_id: int) -> Dict:
+    """Auto-derived context for the student deliverable: their submitted run
+    summary plus best/worst enemy matchups from its analysis."""
+    run = db.user_submitted_run(user_id)
+    if run is None:
+        return {"has_submission": False}
+    ctx = {
+        "has_submission": True,
+        "run_uid": run.get("run_uid") or f"R{run['id']:06d}",
+        "score": run.get("score"),
+        "mission_rate": run.get("mission_rate"),
+        "kill_rate": run.get("kill_rate"),
+        "survival_rate": run.get("survival_rate"),
+        "missile_efficiency": run.get("missile_efficiency"),
+        "mean_reward": run.get("mean_reward"),
+        "steps": run.get("steps"),
+        "enemies": json.loads(run["enemies"]) if run.get("enemies") else [],
+        "best": [], "worst": [],
+    }
+    try:
+        report = json.loads(run["analysis_json"]) if run.get("analysis_json") else None
+        per_enemy = (report or {}).get("stats", {}).get("per_enemy", {})
+        ranked = sorted(
+            per_enemy.items(),
+            key=lambda kv: (kv[1].get("mission_rate", 0), kv[1].get("kills", 0)),
+        )
+        fmt = lambda kv: {"enemy": kv[0], "mission_rate": kv[1].get("mission_rate"),
+                          "kills": kv[1].get("kills")}
+        ctx["worst"] = [fmt(kv) for kv in ranked[:3]]
+        ctx["best"] = [fmt(kv) for kv in ranked[-3:][::-1]]
+    except Exception:
+        pass
+    return ctx
+
+
+@app.get("/api/report")
+async def get_my_report(sid: Optional[str] = Cookie(None)):
+    user = current_user(sid)
+    if user is None:
+        return JSONResponse({"error": "auth"}, status_code=401)
+    rep = db.get_user_report(user["id"])
+    return {
+        "ok": True,
+        "data": json.loads(rep["data"]) if rep else {},
+        "updated_at": rep["updated_at"] if rep else None,
+        "context": _report_context(user["id"]),
+    }
+
+
+@app.post("/api/report")
+async def save_my_report(payload: Dict, sid: Optional[str] = Cookie(None)):
+    user = current_user(sid)
+    if user is None:
+        return JSONResponse({"error": "auth"}, status_code=401)
+    data = payload.get("data", {})
+    if not isinstance(data, dict):
+        return JSONResponse({"ok": False, "error": "Invalid report data."}, status_code=400)
+    # Keep it bounded so a single field can't bloat the DB.
+    clean = {str(k): str(v)[:8000] for k, v in data.items()}
+    db.save_user_report(user["id"], json.dumps(clean))
+    return {"ok": True}
+
+
+@app.get("/api/run/{run_id}/report")
+async def run_report(run_id: int, sid: Optional[str] = Cookie(None)):
+    """View-only run report: selected parameters, learning curve and the
+    analysis that was generated automatically when the run finished."""
     user = current_user(sid)
     if user is None:
         return JSONResponse({"error": "auth"}, status_code=401)
     run = _user_run(user, run_id)
     if run is None:
-        return JSONResponse({"error": "not found"}, status_code=404)
-    if run["status"] != "done" or not run.get("model_path"):
-        return JSONResponse({"ok": False, "error": "Run is not finished or has no saved model."}, status_code=400)
-    if not os.path.exists(run["model_path"]):
-        return JSONResponse({"ok": False, "error": "Model file missing on server."}, status_code=400)
-    try:
-        rewards, scenario = _load_run_config(run_id, run)
-        out_dir = os.path.join(ANALYSIS_DIR, f"run_{run_id}")
-        from bvr.analysis import analyze_model
-        result = analyze_model(run["model_path"], reward_config=rewards, scenario=scenario,
-                               out_dir=out_dir, episodes_per_enemy=10)
-        plots = {name: f"/api/run/{run_id}/analysis/{os.path.basename(path)}"
-                 for name, path in result["plots"].items()}
-        return {"ok": True, "stats": result["stats"], "plots": plots}
-    except Exception as exc:
-        return JSONResponse({"ok": False, "error": str(exc)[:400]}, status_code=500)
+        return JSONResponse({"ok": False, "error": "Run not found or access denied."}, status_code=404)
+
+    rewards, scenario = _load_run_config(run_id, run)
+    enemies = scenario.get("enemies") or (json.loads(run["enemies"]) if run.get("enemies") else [])
+    curve = json.loads(run["curve_json"]) if run.get("curve_json") else {"t": [], "reward": [], "score": []}
+    analysis_status = run.get("analysis_status")
+    report = json.loads(run["analysis_json"]) if run.get("analysis_json") else None
+    stats = plots = None
+    if report and "stats" in report:
+        stats = report["stats"]
+        plots = {name: f"/api/run/{run_id}/analysis/{os.path.basename(fn)}"
+                 for name, fn in (report.get("plots") or {}).items()}
+
+    return {
+        "ok": True,
+        "run": {
+            "id": run["id"], "run_uid": run.get("run_uid") or f"R{run['id']:06d}",
+            "status": run["status"], "steps": run["steps"],
+            "score": run["score"], "mission_rate": run["mission_rate"],
+            "kill_rate": run["kill_rate"], "survival_rate": run["survival_rate"],
+            "mean_reward": run["mean_reward"], "missile_efficiency": run["missile_efficiency"],
+            "submitted": bool(run["submitted"]),
+        },
+        "params": {"steps": run["steps"], "enemies": enemies, "rewards": rewards,
+                   "enemy_weights": json.loads(run["enemy_weights_json"]) if run.get("enemy_weights_json") else {}},
+        "curve": curve,
+        "analysis_status": analysis_status,
+        "stats": stats,
+        "plots": plots,
+        "error": report.get("error") if report else None,
+    }
 
 
 @app.get("/api/run/{run_id}/analysis/{name}")
@@ -474,20 +659,19 @@ async def analysis_file(run_id: int, name: str, sid: Optional[str] = Cookie(None
 
 
 @app.post("/api/run/{run_id}/replay/start")
-async def replay_run(run_id: int, payload: Optional[Dict] = None, sid: Optional[str] = Cookie(None)):
+async def replay_run(run_id: int, payload: Dict = Body(default={}), sid: Optional[str] = Cookie(None)):
     user = current_user(sid)
     if user is None:
         return JSONResponse({"error": "auth"}, status_code=401)
     run = _user_run(user, run_id)
     if run is None:
-        return JSONResponse({"error": "not found"}, status_code=404)
+        return JSONResponse({"ok": False, "error": "Run not found or access denied."}, status_code=404)
     if run["status"] != "done" or not run.get("model_path"):
         return JSONResponse({"ok": False, "error": "Run is not finished."}, status_code=400)
     if not os.path.exists(run["model_path"]):
         return JSONResponse({"ok": False, "error": "Model file missing."}, status_code=400)
     if replay_mgr.busy(user["id"]):
         return JSONResponse({"ok": False, "error": "A replay is already running."}, status_code=409)
-    payload = payload or {}
     enemy = payload.get("enemy", "B1")
     if enemy not in _allowed_enemies():
         enemy = list(training_enemy_pool())[0]
@@ -533,7 +717,7 @@ async def replay_stop(run_id: int, sid: Optional[str] = Cookie(None)):
 
 @app.get("/api/leaderboard")
 async def leaderboard():
-    return {"leaderboard": db.leaderboard(), "enemies": list(training_enemy_pool())}
+    return {"leaderboard": db.leaderboard(), "enemies": list(eval_enemy_pool())}
 
 
 # --- admin ---------------------------------------------------------------
@@ -548,7 +732,10 @@ def _require_admin(sid):
 async def admin_get(sid: Optional[str] = Cookie(None)):
     if _require_admin(sid) is None:
         return JSONResponse({"error": "admin only"}, status_code=403)
-    return {"config": db.get_config(), "runs": db.all_runs(100)}
+    return {"config": db.get_config(), "runs": db.all_runs(100),
+            "reward_editor": rewards_mod.reward_editor_payload(db.get_config()),
+            "code_defaults": rewards_mod.DEFAULT_REWARDS,
+            "code_ranges": rewards_mod.DEFAULT_RANGES}
 
 
 @app.post("/api/admin/config")
@@ -556,9 +743,99 @@ async def admin_set(payload: Dict, sid: Optional[str] = Cookie(None)):
     if _require_admin(sid) is None:
         return JSONResponse({"error": "admin only"}, status_code=403)
     allowed = {"class_access_code", "runs_per_window", "steps_per_run",
-               "window_hours", "max_concurrent", "registration_open"}
+               "window_hours", "max_concurrent", "registration_open",
+               "rewards_start_zero", "reward_defaults_json", "reward_ranges_json",
+               "eval_every_rollouts", "eval_episodes_per_enemy", "live_eval_max_enemies",
+               "locked_eval_episodes_per_enemy", "analysis_episodes_per_enemy",
+               "steps_editable"}
     db.set_config({k: v for k, v in payload.items() if k in allowed})
     return {"ok": True, "config": db.get_config()}
+
+
+@app.delete("/api/admin/run/{run_id}")
+async def admin_delete_run(run_id: int, sid: Optional[str] = Cookie(None)):
+    if _require_admin(sid) is None:
+        return JSONResponse({"error": "admin only"}, status_code=403)
+    run = db.get_run(run_id)
+    if run is None:
+        return JSONResponse({"ok": False, "error": "Run not found."}, status_code=404)
+    jobs.cancel(run_id)
+    _cleanup_run_files(run_id, run)
+    db.delete_run(run_id)
+    return {"ok": True}
+
+
+# --- admin: users panel --------------------------------------------------
+@app.get("/api/admin/users")
+async def admin_users(sid: Optional[str] = Cookie(None)):
+    if _require_admin(sid) is None:
+        return JSONResponse({"error": "admin only"}, status_code=403)
+    cfg = db.get_config()
+    window_hours = float(cfg["window_hours"])
+    per_window = int(cfg["runs_per_window"])
+    users = []
+    for u in db.list_users():
+        used = db.count_runs_in_window(u["id"], window_hours)
+        users.append({
+            **u,
+            "quota_used": used,
+            "quota_per_window": per_window,
+            "quota_remaining": max(0, per_window - used),
+            "has_report": bool(u.get("has_report")),
+        })
+    return {"ok": True, "users": users, "window_hours": window_hours}
+
+
+@app.post("/api/admin/user/{user_id}/reset-quota")
+async def admin_reset_quota(user_id: int, sid: Optional[str] = Cookie(None)):
+    if _require_admin(sid) is None:
+        return JSONResponse({"error": "admin only"}, status_code=403)
+    if db.get_user(user_id) is None:
+        return JSONResponse({"ok": False, "error": "User not found."}, status_code=404)
+    db.reset_user_quota(user_id)
+    return {"ok": True}
+
+
+@app.get("/api/admin/user/{user_id}/report")
+async def admin_user_report(user_id: int, sid: Optional[str] = Cookie(None)):
+    if _require_admin(sid) is None:
+        return JSONResponse({"error": "admin only"}, status_code=403)
+    user = db.get_user(user_id)
+    if user is None:
+        return JSONResponse({"ok": False, "error": "User not found."}, status_code=404)
+    rep = db.get_user_report(user_id)
+    return {
+        "ok": True,
+        "user": {"id": user["id"], "name": user["name"]},
+        "data": json.loads(rep["data"]) if rep else {},
+        "updated_at": rep["updated_at"] if rep else None,
+        "context": _report_context(user_id),
+        "runs": db.list_user_runs(user_id),
+    }
+
+
+@app.get("/api/admin/reports/export")
+async def admin_export_reports(sid: Optional[str] = Cookie(None)):
+    """Download every student's written report + their submitted-run context as
+    one JSON file, for offline grading/review."""
+    if _require_admin(sid) is None:
+        return JSONResponse({"error": "admin only"}, status_code=403)
+    fields = ["strategy", "reward_link", "curve", "results", "matchups", "next_step"]
+    out = []
+    for u in db.list_users():
+        if u.get("is_admin"):
+            continue
+        rep = db.get_user_report(u["id"])
+        data = json.loads(rep["data"]) if rep else {}
+        out.append({
+            "user": u["name"],
+            "updated_at": rep["updated_at"] if rep else None,
+            "report": {k: data.get(k, "") for k in fields},
+            "submission": _report_context(u["id"]),
+        })
+    payload = {"exported_at": time.time(), "students": out}
+    headers = {"Content-Disposition": "attachment; filename=student_reports.json"}
+    return JSONResponse(payload, headers=headers)
 
 
 # --- final competition (admin command) -----------------------------------

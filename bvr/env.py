@@ -38,6 +38,8 @@ MISSILE_SPEED = 2.5    # km per step
 MISSILE_FUEL = 26      # max steps a missile can fly (~65 km if it flew straight)
 MISSILE_TURN = math.radians(18.0)  # missile seeker turn limit -> beaming works
 HIT_RADIUS = 2.0       # km, missile detonation radius
+MISSILE_PK_BASE = 0.94 # probability of kill inside HIT_RADIUS (rest = near-miss)
+STOCH_NOISE = 0.03     # ±3% on radar range, missile pk, and FSM thresholds per episode
 WEZ_RMAX = 40.0        # km, edge of the engagement zone
 WEZ_NEZ = 18.0         # km, no-escape zone
 GOAL_RADIUS = 8.0      # km, mission goal capture radius
@@ -85,6 +87,10 @@ class BVREnv(gym.Env):
         self.enemy_pool: List[str] = list(scenario.get("enemies", ["balanced"]))
         self.random_enemy_prob: float = float(scenario.get("random_enemy_prob", 0.0))
         self.enemy_sampling: str = str(scenario.get("enemy_sampling", "round_robin"))
+        # Optional per-enemy priority (0..1): how often each opponent appears.
+        self.enemy_weights: Dict[str, float] = {
+            str(k): float(v) for k, v in (scenario.get("enemy_weights") or {}).items()
+        }
         self.max_cycles: int = int(scenario.get("max_cycles", 260))
         self._forced_enemy: Optional[str] = None
         self._rr_idx: int = 0
@@ -106,6 +112,8 @@ class BVREnv(gym.Env):
         self.last_terms: Dict[str, float] = {}
         self.last_contributions: Dict[str, float] = {}
         self.episode_result = "pending"
+        self._episode_radar_mult = 1.0
+        self._episode_pk_mult = 1.0
 
     # -- configuration helpers ------------------------------------------------
     def set_enemy(self, name: Optional[str]):
@@ -139,6 +147,13 @@ class BVREnv(gym.Env):
             self.enemy_name = self._forced_enemy
         elif self.random_enemy_prob > 0 and self.rng.uniform() < self.random_enemy_prob:
             self.enemy_name = "random"
+        elif self.enemy_weights:
+            # Priority-weighted sampling: pick proportionally to each enemy's weight.
+            pool = [e for e in self.enemy_pool if e != "random"] or list(self.enemy_pool)
+            w = np.array([max(0.0, self.enemy_weights.get(e, 1.0)) for e in pool], dtype=float)
+            if w.sum() <= 0:
+                w = np.ones(len(pool))
+            self.enemy_name = str(self.rng.choice(pool, p=w / w.sum()))
         elif self.enemy_sampling == "round_robin":
             pool = [e for e in self.enemy_pool if e != "random"] or list(self.enemy_pool)
             self.enemy_name = str(pool[self._rr_idx % len(pool)])
@@ -146,10 +161,12 @@ class BVREnv(gym.Env):
         else:
             self.enemy_name = str(self.rng.choice(self.enemy_pool))
         self.enemy = make_enemy(self.enemy_name, rng=self.rng)
+        self._episode_radar_mult = float(self.rng.uniform(1.0 - STOCH_NOISE, 1.0 + STOCH_NOISE))
+        self._episode_pk_mult = float(self.rng.uniform(1.0 - STOCH_NOISE, 1.0 + STOCH_NOISE))
 
         self._prev_goal_dist = float(np.linalg.norm(self.blue.pos - self.blue.goal))
         self._prev_enemy_dist = float(np.linalg.norm(self.blue.pos - self.red.pos))
-        self._tracked_prev = self._prev_enemy_dist <= RADAR_RANGE
+        self._tracked_prev = self._radar_detects(self._prev_enemy_dist)
 
         return self._obs(), {"enemy": self.enemy_name}
 
@@ -184,7 +201,7 @@ class BVREnv(gym.Env):
         # 4) Geometry / tracking after movement.
         enemy_alive = self.red is not None and self.red.alive
         enemy_dist = float(np.linalg.norm(self.blue.pos - self.red.pos)) if enemy_alive else RADAR_RANGE + 1
-        tracked = enemy_alive and enemy_dist <= RADAR_RANGE
+        tracked = enemy_alive and self._radar_detects(enemy_dist)
         goal_dist = float(np.linalg.norm(self.blue.pos - self.blue.goal))
 
         # 5) Shaping terms.
@@ -272,12 +289,17 @@ class BVREnv(gym.Env):
 
             dist = float(np.linalg.norm(m.pos - target.pos))
             if dist <= HIT_RADIUS:
-                target.alive = False
-                if m.owner == "blue":
-                    hit_enemy = True
-                else:
-                    blue_was_hit = True
-                continue  # missile consumed
+                pk = min(1.0, max(0.05, MISSILE_PK_BASE * self._episode_pk_mult
+                         * float(self.rng.uniform(1.0 - STOCH_NOISE, 1.0 + STOCH_NOISE))))
+                if self.rng.random() < pk:
+                    target.alive = False
+                    if m.owner == "blue":
+                        hit_enemy = True
+                    else:
+                        blue_was_hit = True
+                elif m.owner == "blue":
+                    blue_missile_missed = True
+                continue
             if m.fuel <= 0:
                 if m.owner == "blue":
                     blue_missile_missed = True
@@ -285,6 +307,17 @@ class BVREnv(gym.Env):
             survivors.append(m)
         self.missiles = survivors
         return hit_enemy, blue_was_hit, blue_missile_missed
+
+    def _effective_radar_range(self) -> float:
+        return RADAR_RANGE * self._episode_radar_mult
+
+    def _radar_detects(self, dist: float) -> bool:
+        eff = self._effective_radar_range()
+        if dist > eff:
+            return False
+        if dist > eff * 0.98 and self.rng.random() < STOCH_NOISE:
+            return False
+        return True
 
     def _wez_pair(self, me: Aircraft, opp: Aircraft):
         """A coarse WEZ from `me`'s perspective: nose-on aspect inside RMax with
@@ -329,7 +362,7 @@ class BVREnv(gym.Env):
             "opp_pos": opp.pos if opp is not None else me.pos,
             "opp_heading": opp.heading if opp is not None else me.heading,
             "opp_missiles": opp.missiles if opp is not None else 0,
-            "opp_tracked": opp_alive and opp_dist <= RADAR_RANGE,
+            "opp_tracked": opp_alive and self._radar_detects(opp_dist),
             "opp_dist": opp_dist,
             "incoming_missile": m is not None,
             "incoming_dist": mdist,
@@ -358,7 +391,7 @@ class BVREnv(gym.Env):
 
         opp_alive = opp is not None and opp.alive
         opp_dist = float(np.linalg.norm(me.pos - opp.pos)) if opp_alive else RADAR_RANGE + 1
-        tracked = opp_alive and opp_dist <= RADAR_RANGE
+        tracked = opp_alive and self._radar_detects(opp_dist)
         if tracked:
             evec = opp.pos - me.pos
             los = math.atan2(evec[1], evec[0])

@@ -130,6 +130,66 @@ def evaluate_vs_elite(candidate: Dict, elite: List[Dict], seeds: int,
     return float(np.mean([matchup_score(candidate, opp, seeds, rng) for opp in elite]))
 
 
+def behavior_vector(p: Dict) -> np.ndarray:
+    """Normalized behavioral signature used to measure how different two FSM
+    agents are (so the reference set can span styles, not just top score)."""
+    return np.array([
+        float(p.get("shot_frac", 0.9)) / 1.2,
+        float(p.get("crank_frac", 0.9)) / 1.2,
+        float(p.get("break_dist", 20.0)) / 45.0,
+        1.0 if p.get("aggressive", True) else 0.0,
+        1.0 if p.get("can_fire", True) else 0.0,
+    ], dtype=float)
+
+
+def _dedup_archive(archive: List[Tuple[Dict, float]]) -> List[Tuple[Dict, float]]:
+    """Keep the best score per (rounded) behavior so near-identical clones don't
+    dominate the candidate pool."""
+    best: Dict[tuple, Tuple[Dict, float]] = {}
+    for params, score in archive:
+        key = tuple(np.round(behavior_vector(params), 2))
+        if key not in best or score > best[key][1]:
+            best[key] = (params, score)
+    return list(best.values())
+
+
+def select_diverse_references(archive: List[Tuple[Dict, float]], k: int,
+                              alpha: float = 0.6) -> Tuple[List[Dict], List[float]]:
+    """Pick ``k`` references that are both strong and varied.
+
+    Greedy: always keep the single best agent, then iteratively add the
+    candidate maximizing ``alpha*score + (1-alpha)*distance-to-already-chosen``.
+    ``alpha`` trades raw strength (1.0) against behavioral diversity (0.0).
+    """
+    pool = _dedup_archive(archive)
+    if not pool:
+        return [], []
+    pool.sort(key=lambda x: x[1], reverse=True)
+    scores = np.array([s for _, s in pool], dtype=float)
+    smin, smax = float(scores.min()), float(scores.max())
+    norm = (scores - smin) / (smax - smin) if smax > smin else np.ones_like(scores)
+    vecs = [behavior_vector(p) for p, _ in pool]
+
+    chosen = [0]  # strongest agent first
+    while len(chosen) < min(k, len(pool)):
+        best_i, best_val = None, -1.0
+        for i in range(len(pool)):
+            if i in chosen:
+                continue
+            dist = min(float(np.linalg.norm(vecs[i] - vecs[c])) for c in chosen)
+            dist_norm = min(1.0, dist / 1.5)
+            val = alpha * norm[i] + (1.0 - alpha) * dist_norm
+            if val > best_val:
+                best_val, best_i = val, i
+        if best_i is None:
+            break
+        chosen.append(best_i)
+
+    # Return ordered by raw score (so B1 is the strongest of the diverse set).
+    chosen.sort(key=lambda i: pool[i][1], reverse=True)
+    return [clamp_params(pool[i][0]) for i in chosen], [float(pool[i][1]) for i in chosen]
+
+
 def initial_population(rng: random.Random) -> List[Dict]:
     """Seed from each archetype vs each archetype (5x5 cross grid)."""
     pop: List[Dict] = []
@@ -152,14 +212,22 @@ def initial_population(rng: random.Random) -> List[Dict]:
 
 def optimize(iterations: int = 50, seeds: int = 3, population_size: int = 40,
              progress: Optional[Callable[[int, int, List[Dict], List[float]], None]] = None,
-             rng: Optional[random.Random] = None) -> Tuple[List[Dict], List[float]]:
-    """Run the evolutionary search. Returns (elite_top10_params, elite_scores)."""
+             rng: Optional[random.Random] = None
+             ) -> Tuple[List[Dict], List[float], List[Tuple[Dict, float]]]:
+    """Run the evolutionary search.
+
+    Returns ``(elite_top10_params, elite_scores, archive)`` where ``archive`` is
+    every candidate ever evaluated with its score - used to pick a diverse
+    reference set rather than 10 near-identical top scorers.
+    """
     rng = rng or random.Random(42)
     population = initial_population(rng)
+    archive: List[Tuple[Dict, float]] = []
 
     # Rank seeds by performance vs the five hand-coded archetypes.
     base_elite = [dict(BASE_FSM_PARAMS[n]) for n in SELECTABLE_TYPES]
     scores = [evaluate_vs_elite(cand, base_elite, seeds, rng) for cand in population]
+    archive += [(copy.deepcopy(c), s) for c, s in zip(population, scores)]
 
     elite_idx = np.argsort(scores)[::-1][:ELITE_SIZE]
     elite = [copy.deepcopy(population[i]) for i in elite_idx]
@@ -176,6 +244,7 @@ def optimize(iterations: int = 50, seeds: int = 3, population_size: int = 40,
                 offspring.append(crossover(a, b, rng=rng))
 
         new_scores = [evaluate_vs_elite(cand, elite, seeds, rng) for cand in offspring]
+        archive += [(copy.deepcopy(c), s) for c, s in zip(offspring, new_scores)]
 
         combined = [(copy.deepcopy(e), elite_scores[i]) for i, e in enumerate(elite)]
         combined += [(offspring[i], new_scores[i]) for i in range(len(offspring))]
@@ -187,7 +256,7 @@ def optimize(iterations: int = 50, seeds: int = 3, population_size: int = 40,
         if progress:
             progress(gen + 1, iterations, elite, elite_scores)
 
-    return elite, elite_scores
+    return elite, elite_scores, archive
 
 
 def save_reference_enemies(elite: List[Dict], scores: List[float], out_path: str) -> Dict:
@@ -214,6 +283,9 @@ def main():
     parser.add_argument("--seeds", type=int, default=3, help="Episodes per elite matchup.")
     parser.add_argument("--population", type=int, default=40)
     parser.add_argument("--out", default=os.path.join("config", "reference_enemies.json"))
+    parser.add_argument("--diversity", type=float, default=0.4,
+                        help="0..1: how much behavioral variety vs raw strength "
+                             "to favor when picking the reference set (alpha = 1 - diversity).")
     args = parser.parse_args()
 
     def prog(gen, total, elite, scores):
@@ -224,14 +296,19 @@ def main():
 
     print(f"Optimizing FSM references ({args.iterations} generations, "
           f"elite={ELITE_SIZE}, seeds={args.seeds})...")
-    elite, scores = optimize(
+    elite, scores, archive = optimize(
         iterations=args.iterations,
         seeds=args.seeds,
         population_size=args.population,
         progress=prog,
     )
 
-    payload = save_reference_enemies(elite, scores, args.out)
+    # Pick a strong-but-varied reference set from everything we evaluated.
+    div_params, div_scores = select_diverse_references(
+        archive, REFERENCE_COUNT, alpha=max(0.0, min(1.0, 1.0 - args.diversity)))
+    if len(div_params) < REFERENCE_COUNT:
+        div_params, div_scores = elite, scores
+    payload = save_reference_enemies(div_params, div_scores, args.out)
     print(f"\nSaved {len(payload)} reference enemies to {args.out}:")
     for name in sorted(payload.keys(), key=lambda n: int(n[1:])):
         e = payload[name]

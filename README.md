@@ -153,11 +153,11 @@ before any engagement is possible (no instant shooting). Both carry radar-guided
 missiles with a simplified Weapon Engagement Zone; a missile that is
 out-maneuvered runs out of energy and misses. **Observation:** own state,
 relative geometry to the enemy and goal, WEZ flags, and incoming-missile warning.
-**Action:** `[heading_change, flight_level_change, fire]`.
+**Action:** `[heading_change, flight_level_change, fire]`. Heading and fire drive the 2D fight; flight level is a normalized altitude state the agent can change (visible in observations and replay) but **does not yet affect** radar, missiles, or WEZ in this simplified sim.
 
 The **objective is the mission**: reach the goal area alive. Killing the enemy is
 a means to survive, not the win condition. The competition **score** reflects
-this: `score = 0.7 x mission_rate + 0.3 x kill_rate`, evaluated over many
+this: `score = 0.6 x mission_rate + 0.25 x kill_rate + 0.15 x missile_efficiency`, evaluated over many
 episodes against every locked enemy.
 
 ### The five archetypes (`bvr/enemies.py`)

@@ -130,7 +130,7 @@ python -m bvr.fsm_optimize --iterations 50 --seeds 3
 Evaluated over **12 deterministic episodes per enemy** (locked eval):
 
 ```
-score = 0.7 × mission_rate + 0.3 × kill_rate
+score = 0.6 × mission_rate + 0.25 × kill_rate + 0.15 × missile_efficiency
 ```
 
 Reported per run on the online platform after training completes.

@@ -22,9 +22,10 @@ from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.vec_env import DummyVecEnv
 
 from . import rewards as rewards_mod
-from .env import BVREnv
-from .enemies import SELECTABLE_TYPES, reference_types, training_enemy_pool
+from .env import BVREnv, RADAR_RANGE
+from .enemies import SELECTABLE_TYPES, training_enemy_pool
 from .policy import make_model
+from .scoring import SCORE_FORMULA_LABEL, competition_score
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEFAULT_CONFIG_DIR = os.path.join(PROJECT_ROOT, "config")
@@ -40,13 +41,15 @@ def load_scenario(config_dir: str = DEFAULT_CONFIG_DIR) -> Dict:
                "max_cycles": 260, "train_timesteps": 200000, "seed": 0,
                "enemy_sampling": "round_robin", "eval_episodes_per_enemy": 1,
                "eval_every_rollouts": 2}
+    file_data: Dict = {}
     if os.path.exists(path):
         with open(path, "r", encoding="utf-8") as f:
-            default.update(json.load(f))
-    # When optimized references exist, they replace the archetype list for training.
-    refs = reference_types()
-    if refs:
-        default["enemies"] = refs
+            file_data = json.load(f)
+        default.update(file_data)
+    # Only fall back to the full training pool when the caller didn't pick enemies;
+    # an explicit selection (student run) is always respected.
+    if not file_data.get("enemies"):
+        default["enemies"] = list(training_enemy_pool())
     return default
 
 
@@ -65,20 +68,22 @@ def make_env_fn(reward_config: Dict, scenario: Dict, seed: int = 0):
 # ---------------------------------------------------------------------------
 # Evaluation used both live (during training) and standalone.
 # ---------------------------------------------------------------------------
-def _subsample(frames: List[Dict], cap: int = 140) -> List[Dict]:
+def _subsample(frames: List[Dict], cap: int = 220) -> List[Dict]:
+    """Thin long episodes for the UI but always keep the opening and final moments."""
     if len(frames) <= cap:
         return frames
-    stride = int(np.ceil(len(frames) / cap))
-    return frames[::stride]
+    tail_n = min(24, max(8, cap // 8))
+    head = frames[:-tail_n]
+    tail = frames[-tail_n:]
+    head_cap = max(1, cap - tail_n)
+    stride = max(1, int(np.ceil(len(head) / head_cap)))
+    sampled = head[::stride]
+    if len(sampled) + len(tail) > cap:
+        sampled = sampled[: cap - len(tail)]
+    return sampled + tail
 
 
-# Same composite as competition scoring (see bvr/evaluate.py).
-EVAL_MISSION_WEIGHT = 0.7
-EVAL_KILL_WEIGHT = 0.3
-
-
-def _competition_score(mission: int, kill: int) -> float:
-    return EVAL_MISSION_WEIGHT * mission + EVAL_KILL_WEIGHT * kill
+LIVE_EVAL_FRAME_CAP = 100
 
 
 def _run_one_eval_episode(model, reward_config: Dict, scenario: Dict, enemy: str,
@@ -102,22 +107,30 @@ def _run_one_eval_episode(model, reward_config: Dict, scenario: Dict, enemy: str
         if with_frames:
             frames.append(info["frame"])
         done = terminated or truncated
+    if with_frames:
+        enemy_alive = env.red is not None and env.red.alive
+        enemy_dist = float(np.linalg.norm(env.blue.pos - env.red.pos)) if enemy_alive else RADAR_RANGE + 1
+        tracked = enemy_alive and enemy_dist <= RADAR_RANGE
+        frames.append(env._frame(tracked))
     result = info.get("result", "timeout")
     mission = 1 if result == "mission" else 0
     kill = 1 if (env.red is not None and not env.red.alive) else 0
-    score = _competition_score(mission, kill)
+    missiles_used = BVREnv_missiles_used(env, "blue")
+    eff = (float(kill) / missiles_used) if missiles_used > 0 else 0.0
+    score = competition_score(mission, kill, eff)
     return {
         "enemy": enemy,
         "result": result,
         "win": mission,
         "mission": mission,
         "kill": kill,
+        "missile_efficiency": round(eff, 3),
         "score": round(score, 3),
         "reward": round(float(ep_reward), 3),
         "steps": steps,
         "blue_missiles_used": BVREnv_missiles_used(env, "blue"),
         "contributions": {k: round(v, 4) for k, v in term_totals.items()},
-        "frames": _subsample(frames) if with_frames else [],
+        "frames": _subsample(frames, cap=LIVE_EVAL_FRAME_CAP) if with_frames else [],
     }
 
 
@@ -149,7 +162,9 @@ def run_eval_episodes(model, reward_config: Dict, scenario: Dict,
         kills = int(sum(r.get("kill", 0) for r in runs))
         mission_rate = missions / episodes_per_enemy
         kill_rate = kills / episodes_per_enemy
-        mean_score = float(np.mean([r["score"] for r in runs]))
+        total_fired = float(sum(r["blue_missiles_used"] for r in runs))
+        eff = (kills / total_fired) if total_fired > 0 else 0.0
+        mean_score = competition_score(mission_rate, kill_rate, eff)
         mean_reward = float(np.mean([r["reward"] for r in runs]))
         mean_steps = float(np.mean([r["steps"] for r in runs]))
         last = runs[-1]
@@ -159,6 +174,7 @@ def run_eval_episodes(model, reward_config: Dict, scenario: Dict,
             "win": float(mission_rate),
             "mission_rate": round(mission_rate, 3),
             "kill_rate": round(kill_rate, 3),
+            "missile_efficiency": round(eff, 3),
             "missions": missions,
             "kills": kills,
             "score": round(mean_score, 3),
@@ -172,6 +188,10 @@ def run_eval_episodes(model, reward_config: Dict, scenario: Dict,
         }
         summaries.append(summary)
         if on_progress:
+            # Send this one enemy's (already subsampled) frames so the live match
+            # grid can animate it immediately. One enemy per message keeps each
+            # WebSocket payload small and avoids dropping a huge combined blob.
+            light = {**summary, "frames": sample_frames}
             on_progress({
                 "finished": finished,
                 "total": total,
@@ -180,7 +200,7 @@ def run_eval_episodes(model, reward_config: Dict, scenario: Dict,
                 "running_enemy": enemy,
                 "last_result": last["result"],
                 "enemy_done": True,
-                "enemy_summary": summary,
+                "enemy_summary": light,
             })
     return summaries
 
@@ -204,7 +224,9 @@ class LiveCallback(BaseCallback):
         self.scenario = scenario
         self.total_timesteps = total_timesteps
         self.eval_enemies = eval_enemies
-        self.eval_every_rollouts = max(1, int(scenario.get("eval_every_rollouts", 2)))
+        self.eval_every_rollouts = max(1, int(scenario.get("eval_every_rollouts", 8)))
+        self.live_eval_max_enemies = max(1, int(scenario.get("live_eval_max_enemies", 4)))
+        self._eval_cycle = 0
         self._rollout_count = 0
         self._last_episodes: List[Dict] = []
         self._last_eval_score = 0.0
@@ -243,7 +265,16 @@ class LiveCallback(BaseCallback):
             return
 
         eps_per = max(1, int(self.scenario.get("eval_episodes_per_enemy", 1)))
-        total_sims = len(self.eval_enemies) * eps_per
+        n_pool = len(self.eval_enemies)
+        n_eval = min(self.live_eval_max_enemies, n_pool) if n_pool else 0
+        if n_eval <= 0:
+            self._emit_update(ep_rew_mean, ep_len_mean, self._last_episodes,
+                              self._last_eval_score, eval_ran=False)
+            return
+        offset = (self._eval_cycle * n_eval) % n_pool
+        self._eval_cycle += 1
+        eval_batch = [self.eval_enemies[(offset + i) % n_pool] for i in range(n_eval)]
+        total_sims = len(eval_batch) * eps_per
 
         def prog(p: Dict) -> None:
             self.on_event({
@@ -262,25 +293,33 @@ class LiveCallback(BaseCallback):
             "finished": 0,
             "total": total_sims,
             "enemy_index": 0,
-            "enemy_total": len(self.eval_enemies),
-            "running_enemy": self.eval_enemies[0] if self.eval_enemies else "",
+            "enemy_total": len(eval_batch),
+            "running_enemy": eval_batch[0] if eval_batch else "",
             "episodes_per_enemy": eps_per,
             "state": "starting",
         })
         episodes = run_eval_episodes(
-            self.model, self.reward_config, self.scenario, self.eval_enemies,
+            self.model, self.reward_config, self.scenario, eval_batch,
             episodes_per_enemy=eps_per, with_frames=True, on_progress=prog,
         )
         avg_score = float(np.mean([e["score"] for e in episodes])) if episodes else 0.0
         mean_eval_reward = float(np.mean([e["mean_reward"] for e in episodes])) if episodes else 0.0
-        self._last_episodes = episodes
+        total_kills = float(sum(e.get("kills", 0) for e in episodes))
+        total_fired = float(sum(e.get("blue_missiles_used", 0) for e in episodes))
+        batch_eff = (total_kills / total_fired) if total_fired > 0 else 0.0
+        # Frames were already streamed per-enemy via on_progress; drop them here
+        # so the bulk update event stays small and reliable over the WebSocket.
+        light_episodes = [{**e, "frames": []} for e in episodes]
+        self._last_episodes = light_episodes
         self._last_eval_score = avg_score
-        self._emit_update(ep_rew_mean, ep_len_mean, episodes, avg_score, eval_ran=True, eval_summary={
+        self._emit_update(ep_rew_mean, ep_len_mean, light_episodes, avg_score, eval_ran=True, eval_summary={
             "episodes_per_enemy": eps_per,
             "total_simulations": total_sims,
             "finished": total_sims,
             "score": round(avg_score, 3),
             "mean_eval_reward": round(mean_eval_reward, 3),
+            "missile_efficiency": round(batch_eff, 3),
+            "score_formula": SCORE_FORMULA_LABEL,
             "monitoring_only": True,
         })
 

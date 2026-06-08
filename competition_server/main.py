@@ -142,7 +142,7 @@ async def leaderboard_page():
  td.ts{{color:#8b97ad;font-size:11px}} tr:nth-child(even){{background:#131a29}}
 </style></head><body>
 <h1>BVR Reinforcement Learning - Competition Leaderboard</h1>
-<div class="sub">Each submission is evaluated over {EPISODES_PER_ENEMY} episodes vs every locked enemy. Score = 0.7 x mission rate + 0.3 x kill rate. Auto-refreshes every 20s.</div>
+<div class="sub">Each submission is evaluated over {EPISODES_PER_ENEMY} episodes vs every locked enemy. Score = 0.6 x mission rate + 0.25 x kill rate + 0.15 x missile efficiency. Auto-refreshes every 20s.</div>
 <table><tr><th>#</th><th>name</th><th>score</th><th>mission</th><th>kill</th><th>reward</th><th>missile eff.</th>{head}<th>submitted</th></tr>
 {rows}</table></body></html>"""
 

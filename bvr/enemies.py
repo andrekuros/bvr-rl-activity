@@ -18,10 +18,17 @@ from typing import Dict, Optional
 
 import numpy as np
 
-ENEMY_TYPES = ["duck", "defensive", "balanced", "aggressive", "sniper", "random"]
-SELECTABLE_TYPES = ["duck", "defensive", "balanced", "aggressive", "sniper"]
+ENEMY_TYPES = ["duck", "defensive", "balanced", "aggressive", "sniper",
+               "super_aggressive", "super_defensive", "random"]
+SELECTABLE_TYPES = ["duck", "defensive", "balanced", "aggressive", "sniper",
+                    "super_aggressive", "super_defensive"]
 REFERENCE_PREFIX = "B"
 REFERENCE_COUNT = 10
+# References shown in the student training picker (the rest stay for locked eval).
+TRAINING_REFERENCE_COUNT = 5
+# Fixed hand-coded opponents always offered for training alongside the references.
+TRAINING_ARCHETYPES = ["super_aggressive", "super_defensive", "duck", "balanced"]
+FSM_STOCH_NOISE = 0.03  # ±3% on shoot / crank / break thresholds (per decision)
 
 _CONFIG_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "config")
 _REFERENCE_PATH = os.path.join(_CONFIG_DIR, "reference_enemies.json")
@@ -54,6 +61,19 @@ BASE_FSM_PARAMS: Dict[str, Dict] = {
                    "aggressive": True, "can_fire": True},
     "sniper": {"shot_frac": 1.0, "crank_frac": 1.0, "break_dist": 36.0,
                "aggressive": False, "can_fire": True},
+    # Charges straight at the opponent and fires as soon as it can; almost never
+    # breaks defensively.
+    "super_aggressive": {"shot_frac": 1.0, "crank_frac": 0.0, "break_dist": 6.0,
+                         "aggressive": True, "can_fire": True},
+    # Always running / breaking; keeps maximum distance and only fires point-blank.
+    "super_defensive": {"shot_frac": 0.45, "crank_frac": 1.0, "break_dist": 55.0,
+                        "aggressive": False, "can_fire": True},
+}
+
+# Difficulty scores (0..10) used to color the picker for archetypes.
+ARCHETYPE_SCORES = {
+    "duck": 2.0, "defensive": 8.5, "balanced": 6.5, "aggressive": 7.5,
+    "sniper": 9.0, "super_aggressive": 7.0, "super_defensive": 8.0,
 }
 
 
@@ -68,16 +88,17 @@ class FSMEnemy:
     """
 
     def __init__(self, name, shot_frac, crank_frac, break_dist,
-                 aggressive=True, can_fire=True):
+                 aggressive=True, can_fire=True, rng=None):
         self.name = name
         self.shot_frac = float(shot_frac)
         self.crank_frac = float(crank_frac)
         self.break_dist = float(break_dist)
         self.aggressive = bool(aggressive)
         self.can_fire = bool(can_fire)
+        self.rng = rng or np.random.default_rng()
 
     @classmethod
-    def from_params(cls, name: str, params: Dict) -> "FSMEnemy":
+    def from_params(cls, name: str, params: Dict, rng=None) -> "FSMEnemy":
         p = dict(params)
         return cls(
             name,
@@ -86,7 +107,11 @@ class FSMEnemy:
             break_dist=p.get("break_dist", 26.0),
             aggressive=bool(p.get("aggressive", True)),
             can_fire=bool(p.get("can_fire", True)),
+            rng=rng,
         )
+
+    def _stoch_mult(self) -> float:
+        return float(self.rng.uniform(1.0 - FSM_STOCH_NOISE, 1.0 + FSM_STOCH_NOISE))
 
     def to_params(self) -> Dict:
         return {
@@ -109,7 +134,7 @@ class FSMEnemy:
         goal = state["goal"]
 
         fire = 0.0
-        if state["incoming_missile"] and state["incoming_dist"] < self.break_dist:
+        if state["incoming_missile"] and state["incoming_dist"] < self.break_dist * self._stoch_mult():
             los = _angle_to(pos, opp)
             desired = los + np.deg2rad(135.0)
             return np.array([_steer(heading, desired), 0.0, 0.0], dtype=np.float32)
@@ -117,9 +142,9 @@ class FSMEnemy:
         los_to_opp = _angle_to(pos, opp)
 
         if state["opp_tracked"] and self.can_fire and state["missiles"] > 0:
-            if dist <= self.shot_frac * rmax and state["fire_ready"]:
+            if dist <= self.shot_frac * rmax * self._stoch_mult() and state["fire_ready"]:
                 fire = 1.0
-            if dist <= self.crank_frac * rmax:
+            if dist <= self.crank_frac * rmax * self._stoch_mult():
                 desired = los_to_opp + np.deg2rad(40.0)
                 return np.array([_steer(heading, desired), 0.0, fire], dtype=np.float32)
 
@@ -166,46 +191,108 @@ def reference_types() -> list:
     return names
 
 
-def enemy_catalog() -> Dict:
-    """Metadata for the UI: names, ranks, and optimization scores."""
+def _ref_feature(name: str) -> np.ndarray:
+    """Behavioral feature vector for a reference, used to pick a diverse subset."""
+    p = load_reference_enemies().get(name, {})
+    return np.array([
+        float(p.get("shot_frac", 0.9)),
+        float(p.get("crank_frac", 0.9)),
+        float(p.get("break_dist", 30.0)) / 40.0,
+        1.0 if p.get("aggressive", True) else 0.0,
+    ], dtype=float)
+
+
+def diverse_reference_subset(k: int = TRAINING_REFERENCE_COUNT) -> list:
+    """Pick ``k`` references that span the behavior space: start from the
+    top-ranked one, then greedily add the opponent farthest from those already
+    chosen (farthest-point sampling). Returned in rank order for display."""
+    names = reference_types()
+    if len(names) <= k:
+        return names
+    chosen = [names[0]]
+    while len(chosen) < k:
+        best_n, best_d = None, -1.0
+        for n in names:
+            if n in chosen:
+                continue
+            d = min(float(np.linalg.norm(_ref_feature(n) - _ref_feature(c))) for c in chosen)
+            if d > best_d:
+                best_d, best_n = d, n
+        if best_n is None:
+            break
+        chosen.append(best_n)
+    return [n for n in names if n in chosen]
+
+
+def _catalog_entry(name: str, rank: int) -> Dict:
     refs = load_reference_enemies()
-    if refs:
-        names = reference_types()
+    if name in refs:
+        r = refs[name]
         return {
-            "mode": "reference",
-            "names": names,
-            "info": {
-                n: {
-                    "rank": refs[n].get("rank", int(n[1:]) if n[1:].isdigit() else 0),
-                    "score": refs[n].get("score"),
-                    "label": f"{n}  (#{refs[n].get('rank', n[1:])}, score {float(refs[n].get('score', 0)):.2f})",
-                }
-                for n in names
+            "rank": r.get("rank", rank),
+            "score": float(r.get("score", 0)),
+            "kind": "reference",
+            "label": f"{name}  (#{r.get('rank', rank)}, score {float(r.get('score', 0)):.2f})",
+            "params": {
+                "shot_frac": float(r.get("shot_frac", 0.9)),
+                "crank_frac": float(r.get("crank_frac", 0.9)),
+                "break_dist": float(r.get("break_dist", 30.0)),
+                "aggressive": bool(r.get("aggressive", True)),
+                "can_fire": bool(r.get("can_fire", True)),
             },
         }
+    params = BASE_FSM_PARAMS.get(name, BASE_FSM_PARAMS["balanced"])
     return {
-        "mode": "archetype",
-        "names": list(SELECTABLE_TYPES),
-        "info": {n: {"label": n} for n in SELECTABLE_TYPES},
+        "rank": rank,
+        "score": ARCHETYPE_SCORES.get(name, 5.0),
+        "kind": "archetype",
+        "label": name.replace("_", " "),
+        "params": dict(params),
+    }
+
+
+def enemy_catalog() -> Dict:
+    """Metadata for the student training picker: diverse references + fixed
+    archetypes, each with FSM params and a difficulty score."""
+    names = training_enemy_pool()
+    mode = "reference" if load_reference_enemies() else "archetype"
+    return {
+        "mode": mode,
+        "names": names,
+        "info": {n: _catalog_entry(n, i + 1) for i, n in enumerate(names)},
     }
 
 
 def training_enemy_pool() -> list:
-    """Enemies used for student training: reference B1..B10 if present, else archetypes."""
-    return enemy_catalog()["names"]
+    """Opponents a student may pick for training: a diverse subset of the
+    references (if any) plus the fixed hand-coded archetypes."""
+    refs = diverse_reference_subset()
+    if refs:
+        archetypes = [a for a in TRAINING_ARCHETYPES if a in BASE_FSM_PARAMS]
+        return refs + [a for a in archetypes if a not in refs]
+    return list(SELECTABLE_TYPES)
+
+
+def eval_enemy_pool() -> list:
+    """Fixed opponent set for locked scoring / final competition: every
+    reference plus every static FSM archetype (students cannot change this)."""
+    refs = reference_types()
+    statics = [t for t in ENEMY_TYPES if t != "random"]
+    return refs + statics if refs else statics
 
 
 def make_enemy(name, rng=None):
     """Factory mapping a scenario name to an enemy instance."""
+    rng = rng or np.random.default_rng()
     name = str(name)
     key = name.upper()
     refs = load_reference_enemies()
     if key in refs:
-        return FSMEnemy.from_params(key, refs[key])
+        return FSMEnemy.from_params(key, refs[key], rng=rng)
 
     name = name.lower()
     if name in BASE_FSM_PARAMS:
-        return FSMEnemy.from_params(name, BASE_FSM_PARAMS[name])
+        return FSMEnemy.from_params(name, BASE_FSM_PARAMS[name], rng=rng)
     if name == "random":
         return RandomEnemy(rng)
     raise ValueError(f"Unknown enemy type: {name!r}. Options: {ENEMY_TYPES + reference_types()}")

@@ -41,7 +41,7 @@ You have a limited number of training runs per hour (shown in the top bar as **q
 - You must fly to a **goal** on the far side.
 - A **red enemy** tries to shoot you with radar-guided missiles.
 - You start **far apart** (outside radar range) — you must navigate and close before fighting.
-- Actions: change heading, change altitude, fire missile.
+- Actions: change heading, change normalized flight level (stored state only — combat geometry is 2D), fire missile.
 
 ---
 

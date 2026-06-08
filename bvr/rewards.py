@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import json
 import os
-from typing import Dict, Tuple
+from typing import Dict, Optional, Tuple
 
 # Large, sparse, end-of-episode style signals.
 EVENT_TERMS = [
@@ -47,6 +47,108 @@ DEFAULT_REWARDS: Dict[str, float] = {
     "closing_bonus": 0.0,
     "wez_advantage": 0.0,
 }
+
+# Short help shown as tooltips in the student UI (English to match the dashboard).
+TERM_HELP: Dict[str, str] = {
+    "global_scale": "Multiplies every reward/penalty term. Leave at 1.0 unless rescaling the whole signal.",
+    "mission_completed": "Large bonus when you reach the goal area alive. Primary mission objective.",
+    "hit_enemy": "Bonus for shooting down the enemy. Helps survival but should not dominate mission.",
+    "was_hit": "Weight when shot down. Negative = penalty; positive would reward getting hit (unusual).",
+    "fire_missile": "Weight per missile launch. Negative = cost; positive = bonus for firing.",
+    "miss_missile": "Weight when a missile misses. Negative = penalty; positive = bonus.",
+    "mission_shaping": "Small per-step reward for moving toward the goal. Helps early learning.",
+    "maintain_track": "Tiny per-step reward while the enemy stays on your radar.",
+    "lost_track": "Weight when radar lock is lost. Negative = penalty; positive = bonus.",
+    "closing_bonus": "Per-step reward for closing distance to the enemy (optional aggression).",
+    "wez_advantage": "Per-step reward when you are in missile range but the enemy is not.",
+}
+
+# Default min/max for student inputs (admin can override via platform config).
+# All weight terms allow positive (reward) or negative (penalty); sign is up to the student.
+DEFAULT_RANGES: Dict[str, Dict[str, float]] = {
+    "global_scale": {"min": 0.0, "max": 10.0, "step": 0.1},
+    "mission_completed": {"min": -100.0, "max": 100.0, "step": 0.5},
+    "hit_enemy": {"min": -100.0, "max": 100.0, "step": 0.5},
+    "was_hit": {"min": -100.0, "max": 100.0, "step": 0.5},
+    "fire_missile": {"min": -10.0, "max": 10.0, "step": 0.05},
+    "miss_missile": {"min": -10.0, "max": 10.0, "step": 0.1},
+    "mission_shaping": {"min": -10.0, "max": 10.0, "step": 0.01},
+    "maintain_track": {"min": -1.0, "max": 1.0, "step": 0.001},
+    "lost_track": {"min": -10.0, "max": 10.0, "step": 0.05},
+    "closing_bonus": {"min": -10.0, "max": 10.0, "step": 0.01},
+    "wez_advantage": {"min": -10.0, "max": 10.0, "step": 0.01},
+}
+
+ALL_REWARD_KEYS = ["global_scale"] + REWARD_TERMS
+
+
+def parse_json_map(raw: str, fallback: Dict) -> Dict:
+    if not raw or not str(raw).strip():
+        return dict(fallback)
+    try:
+        data = json.loads(raw)
+        return data if isinstance(data, dict) else dict(fallback)
+    except json.JSONDecodeError:
+        return dict(fallback)
+
+
+def reward_defaults_from_config(platform_cfg: Optional[Dict[str, str]] = None) -> Dict[str, float]:
+    """Student form defaults: start at zero or instructor-configured values."""
+    base = configured_reward_defaults(platform_cfg)
+    cfg = platform_cfg or {}
+    if cfg.get("rewards_start_zero", "0") == "1":
+        for k in ALL_REWARD_KEYS:
+            base[k] = 0.0
+    return base
+
+
+def configured_reward_defaults(platform_cfg: Optional[Dict[str, str]] = None) -> Dict[str, float]:
+    """Instructor defaults from platform config (ignores start-at-zero)."""
+    cfg = platform_cfg or {}
+    base = dict(DEFAULT_REWARDS)
+    overrides = parse_json_map(cfg.get("reward_defaults_json", ""), {})
+    for k in ALL_REWARD_KEYS:
+        if k in overrides:
+            base[k] = float(overrides[k])
+    return base
+
+
+def reward_ranges_from_config(platform_cfg: Optional[Dict[str, str]] = None) -> Dict[str, Dict[str, float]]:
+    cfg = platform_cfg or {}
+    base = {k: dict(v) for k, v in DEFAULT_RANGES.items()}
+    overrides = parse_json_map(cfg.get("reward_ranges_json", ""), {})
+    for k, spec in overrides.items():
+        if k not in base or not isinstance(spec, dict):
+            continue
+        for field in ("min", "max", "step"):
+            if field in spec:
+                base[k][field] = float(spec[field])
+    return base
+
+
+def clamp_rewards(rewards: Dict[str, float], ranges: Optional[Dict[str, Dict[str, float]]] = None) -> Dict[str, float]:
+    """Clamp submitted weights to allowed ranges."""
+    ranges = ranges or DEFAULT_RANGES
+    out = {"global_scale": float(rewards.get("global_scale", 0.0))}
+    spec_gs = ranges.get("global_scale", DEFAULT_RANGES["global_scale"])
+    out["global_scale"] = max(spec_gs["min"], min(spec_gs["max"], out["global_scale"]))
+    for k in REWARD_TERMS:
+        val = float(rewards.get(k, 0.0))
+        spec = ranges.get(k, DEFAULT_RANGES.get(k, {"min": -50, "max": 50}))
+        out[k] = max(spec["min"], min(spec["max"], val))
+    return out
+
+
+def reward_editor_payload(platform_cfg: Optional[Dict[str, str]] = None) -> Dict:
+    cfg = platform_cfg or {}
+    return {
+        "start_zero": cfg.get("rewards_start_zero", "0") == "1",
+        "defaults": reward_defaults_from_config(cfg),
+        "configured_defaults": configured_reward_defaults(cfg),
+        "ranges": reward_ranges_from_config(cfg),
+        "help": TERM_HELP,
+        "terms": {"event": EVENT_TERMS, "shaping": SHAPING_TERMS},
+    }
 
 
 def load_rewards(path: str) -> Dict[str, float]:

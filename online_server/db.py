@@ -22,9 +22,18 @@ DEFAULT_CONFIG = {
     "class_access_code": "BVR2026",
     "runs_per_window": "10",
     "steps_per_run": "200000",
+    "steps_editable": "0",
     "window_hours": "1",
     "max_concurrent": "2",
     "registration_open": "1",
+    "rewards_start_zero": "0",
+    "reward_defaults_json": "",
+    "reward_ranges_json": "",
+    "eval_every_rollouts": "8",
+    "eval_episodes_per_enemy": "1",
+    "live_eval_max_enemies": "4",
+    "locked_eval_episodes_per_enemy": "30",
+    "analysis_episodes_per_enemy": "10",
 }
 
 
@@ -81,11 +90,40 @@ def init_db() -> None:
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS user_reports (
+                user_id INTEGER PRIMARY KEY,
+                data_json TEXT NOT NULL,
+                updated_at REAL NOT NULL,
+                FOREIGN KEY(user_id) REFERENCES users(id)
+            );
             """
         )
         for k, v in DEFAULT_CONFIG.items():
             conn.execute("INSERT OR IGNORE INTO config(key, value) VALUES (?, ?)", (k, v))
+        try:
+            conn.execute("ALTER TABLE users ADD COLUMN quota_reset_at REAL")
+        except sqlite3.OperationalError:
+            pass
+        # Migrations for columns added after the initial schema.
+        for col, decl in (
+            ("curve_json", "TEXT"),
+            ("analysis_json", "TEXT"),
+            ("analysis_status", "TEXT"),
+            ("run_uid", "TEXT"),
+            ("enemy_weights_json", "TEXT"),
+        ):
+            try:
+                conn.execute(f"ALTER TABLE runs ADD COLUMN {col} {decl}")
+            except sqlite3.OperationalError:
+                pass  # column already exists
+        conn.execute(
+            "UPDATE runs SET run_uid = 'R' || printf('%06d', id) WHERE run_uid IS NULL OR run_uid = ''"
+        )
     conn.close()
+
+
+def _run_uid(run_id: int) -> str:
+    return f"R{int(run_id):06d}"
 
 
 # --- config --------------------------------------------------------------
@@ -215,16 +253,19 @@ def set_password(name: str, password: str) -> bool:
 
 
 # --- runs ----------------------------------------------------------------
-def create_run(user_id: int, steps: int, rewards_json: str, enemies: str) -> int:
+def create_run(user_id: int, steps: int, rewards_json: str, enemies: str,
+               enemy_weights_json: Optional[str] = None) -> int:
     conn = _connect()
     with conn:
         cur = conn.execute(
-            "INSERT INTO runs(user_id, status, steps, rewards_json, enemies, created_at) "
-            "VALUES (?,?,?,?,?,?)",
-            (user_id, "queued", steps, rewards_json, enemies, time.time()),
+            "INSERT INTO runs(user_id, status, steps, rewards_json, enemies, "
+            "enemy_weights_json, created_at) VALUES (?,?,?,?,?,?,?)",
+            (user_id, "queued", steps, rewards_json, enemies, enemy_weights_json, time.time()),
         )
+        run_id = cur.lastrowid
+        conn.execute("UPDATE runs SET run_uid=? WHERE id=?", (_run_uid(run_id), run_id))
     conn.close()
-    return cur.lastrowid
+    return run_id
 
 
 def update_run(run_id: int, **fields) -> None:
@@ -247,18 +288,36 @@ def get_run(run_id: int) -> Optional[Dict]:
 def list_user_runs(user_id: int, limit: int = 50) -> List[Dict]:
     conn = _connect()
     rows = conn.execute(
-        "SELECT * FROM runs WHERE user_id=? ORDER BY created_at DESC LIMIT ?",
+        """
+        SELECT r.*, u.name AS user_name
+        FROM runs r JOIN users u ON u.id = r.user_id
+        WHERE r.user_id=? ORDER BY r.created_at DESC LIMIT ?
+        """,
         (user_id, limit),
     ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
 
 
+def delete_run(run_id: int) -> bool:
+    conn = _connect()
+    with conn:
+        cur = conn.execute("DELETE FROM runs WHERE id=?", (run_id,))
+    conn.close()
+    return cur.rowcount > 0
+
+
 def count_runs_in_window(user_id: int, window_hours: float) -> int:
     """How many runs the user has STARTED within the rolling window (counts
-    queued/running/done/error/stopped - i.e. every attempt consumes quota)."""
+    queued/running/done/error/stopped - i.e. every attempt consumes quota).
+
+    An admin quota reset sets ``quota_reset_at``; runs created before that
+    moment no longer count against the window."""
     since = time.time() - window_hours * 3600
     conn = _connect()
+    reset_row = conn.execute("SELECT quota_reset_at FROM users WHERE id=?", (user_id,)).fetchone()
+    reset_at = (reset_row["quota_reset_at"] if reset_row else None) or 0.0
+    since = max(since, float(reset_at))
     n = conn.execute(
         "SELECT COUNT(*) c FROM runs WHERE user_id=? AND created_at>=?",
         (user_id, since),
@@ -267,11 +326,73 @@ def count_runs_in_window(user_id: int, window_hours: float) -> int:
     return n
 
 
+def reset_user_quota(user_id: int) -> None:
+    """Clear the rolling-window run count for a user (admin action)."""
+    conn = _connect()
+    with conn:
+        conn.execute("UPDATE users SET quota_reset_at=? WHERE id=?", (time.time(), user_id))
+    conn.close()
+
+
+def list_users() -> List[Dict]:
+    """All users with run tallies and submission, for the admin users panel."""
+    conn = _connect()
+    rows = conn.execute(
+        """
+        SELECT u.id, u.name, u.is_admin, u.created_at, u.quota_reset_at,
+               COUNT(r.id) AS total_runs,
+               SUM(CASE WHEN r.status='done' THEN 1 ELSE 0 END) AS done_runs,
+               MAX(CASE WHEN r.submitted=1 THEN r.score END) AS submitted_score,
+               (SELECT COUNT(1) FROM user_reports ur WHERE ur.user_id=u.id) AS has_report
+        FROM users u
+        LEFT JOIN runs r ON r.user_id = u.id
+        GROUP BY u.id
+        ORDER BY u.is_admin ASC, u.name ASC
+        """
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_user_report(user_id: int) -> Optional[Dict]:
+    conn = _connect()
+    row = conn.execute(
+        "SELECT data_json, updated_at FROM user_reports WHERE user_id=?", (user_id,)
+    ).fetchone()
+    conn.close()
+    if row is None:
+        return None
+    return {"data": row["data_json"], "updated_at": row["updated_at"]}
+
+
+def save_user_report(user_id: int, data_json: str) -> None:
+    conn = _connect()
+    with conn:
+        conn.execute(
+            "INSERT INTO user_reports(user_id, data_json, updated_at) VALUES (?,?,?) "
+            "ON CONFLICT(user_id) DO UPDATE SET data_json=excluded.data_json, updated_at=excluded.updated_at",
+            (user_id, data_json, time.time()),
+        )
+    conn.close()
+
+
 def list_queued_runs() -> List[Dict]:
     conn = _connect()
     rows = conn.execute("SELECT * FROM runs WHERE status='queued' ORDER BY created_at ASC").fetchall()
     conn.close()
     return [dict(r) for r in rows]
+
+
+def user_submitted_run(user_id: int) -> Optional[Dict]:
+    """The user's currently submitted run (if any)."""
+    conn = _connect()
+    row = conn.execute(
+        "SELECT * FROM runs WHERE user_id=? AND submitted=1 AND status='done' "
+        "ORDER BY score DESC LIMIT 1",
+        (user_id,),
+    ).fetchone()
+    conn.close()
+    return dict(row) if row else None
 
 
 def set_submitted_exclusive(user_id: int, run_id: int) -> None:
@@ -318,8 +439,11 @@ def submitted_entries() -> List[Dict]:
 def all_runs(limit: int = 200) -> List[Dict]:
     conn = _connect()
     rows = conn.execute(
-        "SELECT r.*, u.name AS user_name FROM runs r JOIN users u ON u.id=r.user_id "
-        "ORDER BY r.created_at DESC LIMIT ?",
+        """
+        SELECT r.*, u.name AS user_name
+        FROM runs r JOIN users u ON u.id=r.user_id
+        ORDER BY r.created_at DESC LIMIT ?
+        """,
         (limit,),
     ).fetchall()
     conn.close()

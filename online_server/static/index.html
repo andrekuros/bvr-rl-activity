@@ -119,13 +119,6 @@
             <h2>Run complete <small id="post-run-label"></small></h2>
             <p class="hint" id="post-report-status">Analysis runs automatically when training finishes…</p>
             <div id="post-report" class="run-report"></div>
-            <div class="run-tools">
-              <select id="post-replay-enemy"></select>
-              <button id="post-replay-btn">Watch replay</button>
-              <button id="post-replay-stop" class="danger hidden">Stop replay</button>
-              <span id="post-replay-info" class="hint"></span>
-            </div>
-            <canvas id="post-replay" class="replay-canvas" width="420" height="420"></canvas>
           </div>
         </main>
       </div>
@@ -141,13 +134,6 @@
         <h2>Run report <small id="run-detail-label"></small></h2>
         <p class="hint" id="detail-report-status"></p>
         <div id="detail-report" class="run-report"></div>
-        <div class="run-tools">
-          <select id="detail-replay-enemy"></select>
-          <button id="detail-replay-btn">Watch replay</button>
-          <button id="detail-replay-stop" class="danger hidden">Stop replay</button>
-          <span id="detail-replay-info" class="hint"></span>
-        </div>
-        <canvas id="detail-replay" class="replay-canvas" width="420" height="420"></canvas>
       </div>
     </section>
 
@@ -155,13 +141,13 @@
     <section id="view-report" class="view">
       <div class="panel">
         <div class="report-head">
-          <h2><span id="report-title">Activity report</span> <small id="report-subtitle">your written analysis — the deliverable beyond the submitted model</small></h2>
+          <h2><span id="report-title">Relatório — TE-276</span> <small id="report-subtitle">2 respostas com base no seu run submetido</small></h2>
           <div class="report-lang">
+            <button type="button" class="report-lang-btn active" data-lang="pt" onclick="setReportLang('pt')">PT</button>
             <button type="button" class="report-lang-btn" data-lang="en" onclick="setReportLang('en')">EN</button>
-            <button type="button" class="report-lang-btn" data-lang="pt" onclick="setReportLang('pt')">PT</button>
           </div>
         </div>
-        <p class="hint" id="report-intro">Base your answers on your runs, the analysis charts, replays and your submitted model. Keep answers short and specific. Click Save report to store your work.</p>
+        <p class="hint" id="report-intro">Use suas execuções, os gráficos de análise e os replays como evidência. Responda as duas seções com objetividade e clique em Salvar relatório.</p>
         <div id="report-context" class="report-context"></div>
       </div>
       <div class="panel">
@@ -263,7 +249,7 @@
 
   <script src="/static/charts.js?v=1"></script>
   <script src="/static/reward-editor.js?v=4"></script>
-  <script src="/static/enemy-picker.js?v=2"></script>
-  <script src="/static/app.js?v=24"></script>
+  <script src="/static/enemy-picker.js?v=3"></script>
+  <script src="/static/app.js?v=31"></script>
 </body>
 </html>

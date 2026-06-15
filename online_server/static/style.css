@@ -125,6 +125,10 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 
 .match-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 12px; }
 .match { background: #0d1322; border: 1px solid var(--line); border-radius: 8px; padding: 6px; }
+.match.replay-card { transition: border-color 0.15s; }
+.match.replay-card.replay-playing { border-color: #4c9be8; box-shadow: 0 0 0 1px rgba(76,155,232,0.35); }
+.live-play-btn { margin: 4px 0 6px; width: 100%; }
+.report-profile-map { max-width: 540px; margin: 8px 0 16px; }
 .match .cap { display: flex; justify-content: space-between; font-size: 12px; margin-bottom: 4px; }
 .match canvas { width: 100%; height: auto; display: block; border-radius: 4px; }
 .tag { font-size: 11px; padding: 1px 7px; border-radius: 10px; }

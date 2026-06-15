@@ -9,18 +9,12 @@ let evalEpochs = [];
 let selectedEpochIdx = -1;
 let liveEpochId = null;
 let matchEpisodes = [];
-let matchIdx = 0;
-let matchHold = 0;
+const analysisReplayCache = {};  // prefix -> { enemies, replays }
+let liveReplayPlaying = null;    // { cardIdx, idx, hold, canvasId, frames }
+let analysisFrameReplay = null;  // { prefix, idx, hold, canvasId, frames, enemy }
 const MATCH_HOLD_FRAMES = 55;
-let replayHold = 0;
-const REPLAY_HOLD_FRAMES = 80;
 let lastDoneRunId = null;
 let detailRunId = null;
-let replayRunId = null;
-let replayInfoEl = null;
-let replayCanvasId = null;
-const replayBuffer = [];
-let replayIdx = 0;
 let adminRewardEditor = null;
 
 // ---------------------------------------------------------------- auth
@@ -237,8 +231,7 @@ function resetEvalEpochs() {
   liveEpochId = null;
   evalLiveEpisodes = [];
   matchEpisodes = [];
-  matchIdx = 0;
-  matchHold = 0;
+  stopLiveReplay();
   renderEpochTabs();
   if ($("match-grid")) $("match-grid").innerHTML = "";
   if ($("eval-overall")) $("eval-overall").textContent = "";
@@ -274,14 +267,13 @@ function renderEpochTabs() {
 }
 
 function selectEpoch(idx) {
+  stopLiveReplay();
   selectedEpochIdx = idx;
   if (idx === -1) {
-    matchEpisodes = evalLiveEpisodes.filter(Boolean).map((e) => ({ ...e }));
+    matchEpisodes = evalLiveEpisodes.map((e) => (e ? { ...e } : undefined));
   } else {
     matchEpisodes = evalEpochs[idx].episodes.map((e) => ({ ...e }));
   }
-  matchIdx = 0;
-  matchHold = 0;
   buildMatchGrid(matchEpisodes);
   renderEpochTabs();
   updateEvalOverallForSelection();
@@ -316,8 +308,7 @@ function finalizeLiveEpoch(timesteps, score) {
   liveEpochId = null;
   selectedEpochIdx = evalEpochs.length - 1;
   matchEpisodes = episodes;
-  matchIdx = 0;
-  matchHold = 0;
+  stopLiveReplay();
   buildMatchGrid(matchEpisodes);
   renderEpochTabs();
   updateEvalOverallForSelection();
@@ -349,9 +340,10 @@ function showEvalProgress(ev) {
   box.classList.remove("hidden");
   if (ev.state === "starting") {
     evalLiveEpisodes = [];
+    matchEpisodes = [];
     liveEpochId = ev.eval_epoch || evalEpochs.length + 1;
     selectedEpochIdx = -1;
-    matchIdx = 0;
+    stopLiveReplay();
     if ($("match-grid")) $("match-grid").innerHTML = "";
     if ($("eval-overall")) $("eval-overall").textContent = "Running eval pass…";
     renderEpochTabs();
@@ -372,10 +364,10 @@ function showEvalProgress(ev) {
   }
   if (ev.enemy_done && ev.enemy_summary) {
     const idx = (ev.enemy_index || 1) - 1;
-    evalLiveEpisodes[idx] = ev.enemy_summary;
+    evalLiveEpisodes[idx] = { ...ev.enemy_summary };
     if (selectedEpochIdx === -1) {
-      matchEpisodes[idx] = ev.enemy_summary;
-      renderEvalCard(ev.enemy_summary, idx);
+      matchEpisodes[idx] = { ...ev.enemy_summary };
+      renderEvalCard(ev.enemy_summary, idx, "match-grid", "mc");
     }
     const avg = avgEvalScore(evalLiveEpisodes);
     const done = evalLiveEpisodes.filter(Boolean).length;
@@ -388,35 +380,143 @@ function showEvalProgress(ev) {
     }
   }
 }
-function renderEvalCard(ep, i) {
-  const grid = $("match-grid");
+function stopLiveReplay() {
+  if (!liveReplayPlaying) return;
+  const { cardIdx, canvasId, frames } = liveReplayPlaying;
+  liveReplayPlaying = null;
+  refreshLivePlayButtons();
+  const cv = document.getElementById(canvasId);
+  if (cv && frames?.length) drawFrame(cv.getContext("2d"), frames[0], cv.width, cv.height);
+}
+function playLiveReplay(i) {
+  const ep = matchEpisodes[i];
+  if (!ep?.frames?.length) return;
+  if (liveReplayPlaying?.cardIdx === i) {
+    stopLiveReplay();
+    return;
+  }
+  stopLiveReplay();
+  stopAnalysisFrameReplay();
+  const cvId = `mc${i}`;
+  liveReplayPlaying = { cardIdx: i, idx: 0, hold: 0, canvasId: cvId, frames: ep.frames };
+  refreshLivePlayButtons();
+}
+function refreshLivePlayButtons() {
+  for (let i = 0; i < matchEpisodes.length; i++) {
+    const card = document.getElementById(`match-grid-card-${i}`);
+    if (!card) continue;
+    const playing = liveReplayPlaying?.cardIdx === i;
+    card.classList.toggle("replay-playing", playing);
+    const btn = card.querySelector(".live-play-btn");
+    if (btn) btn.textContent = playing ? "■ Stop" : "▶ Play";
+  }
+}
+function stopAnalysisFrameReplay(prefix) {
+  if (analysisFrameReplay && (!prefix || analysisFrameReplay.prefix === prefix)) {
+    const { prefix: p, canvasId, frames } = analysisFrameReplay;
+    analysisFrameReplay = null;
+    $(`${p}-analysis-replay-stop`)?.classList.add("hidden");
+    const cv = $(canvasId);
+    if (cv && frames?.length) drawFrame(cv.getContext("2d"), frames[0], cv.width, cv.height);
+  }
+}
+function showAnalysisReplayPreview(prefix) {
+  const enemy = $(`${prefix}-analysis-replay-enemy`)?.value;
+  const ep = analysisReplayCache[prefix]?.replays?.[enemy];
+  const info = $(`${prefix}-analysis-replay-info`);
+  const cv = $(`${prefix}-analysis-replay`);
+  if (!ep?.frames?.length) {
+    if (info) info.textContent = enemy ? "No replay for this opponent." : "";
+    if (cv) drawFrame(cv.getContext("2d"), { arena: 120 }, cv.width, cv.height);
+    return;
+  }
+  if (info) {
+    const worst = ep.picked_worst ? " (worst of eval runs)" : "";
+    const evalMr = ep.mission_rate != null ? ` · eval ${(ep.mission_rate * 100).toFixed(0)}% mission` : "";
+    info.textContent = `${ep.result}${evalMr}${worst} · ${Math.round(ep.steps || 0)} steps`;
+  }
+  if (cv) drawFrame(cv.getContext("2d"), ep.frames[0], cv.width, cv.height);
+}
+function playAnalysisFrameReplay(prefix) {
+  const enemy = $(`${prefix}-analysis-replay-enemy`)?.value;
+  const ep = analysisReplayCache[prefix]?.replays?.[enemy];
+  if (!ep?.frames?.length) {
+    showAnalysisReplayPreview(prefix);
+    return;
+  }
+  if (analysisFrameReplay?.prefix === prefix && analysisFrameReplay?.enemy === enemy) {
+    stopAnalysisFrameReplay(prefix);
+    return;
+  }
+  stopLiveReplay();
+  stopAnalysisFrameReplay();
+  analysisFrameReplay = {
+    prefix,
+    enemy,
+    idx: 0,
+    hold: 0,
+    canvasId: `${prefix}-analysis-replay`,
+    frames: ep.frames,
+  };
+  $(`${prefix}-analysis-replay-stop`)?.classList.remove("hidden");
+  showAnalysisReplayPreview(prefix);
+}
+function advanceFrameReplay(state) {
+  if (!state?.frames?.length) return state;
+  const cv = $(state.canvasId) || document.getElementById(state.canvasId);
+  if (!cv) return state;
+  const frameIdx = Math.min(state.idx, state.frames.length - 1);
+  drawFrame(cv.getContext("2d"), state.frames[frameIdx], cv.width, cv.height);
+  if (state.idx < state.frames.length - 1) return { ...state, idx: state.idx + 1, hold: 0 };
+  const hold = state.hold + 1;
+  if (hold > MATCH_HOLD_FRAMES) return { ...state, idx: 0, hold: 0 };
+  return { ...state, hold };
+}
+function renderEvalCard(ep, i, gridId = "match-grid", idPrefix = "mc") {
+  const grid = $(gridId);
   if (!grid) return;
-  let wrap = document.getElementById("match-" + i);
+  const cardId = `${gridId}-card-${i}`;
+  const cvId = `${idPrefix}${i}`;
+  const hasFrames = !!(ep.frames && ep.frames.length);
+  const playing = liveReplayPlaying?.cardIdx === i;
+  let wrap = document.getElementById(cardId);
   if (!wrap) {
     wrap = document.createElement("div");
-    wrap.className = "match";
-    wrap.id = "match-" + i;
+    wrap.className = "match replay-card";
+    wrap.id = cardId;
     wrap.innerHTML = `<div class="cap"><b>${ep.enemy}</b><span class="tag"></span></div>
-      <div class="meta hint"></div><canvas width="170" height="170" id="mc${i}"></canvas>`;
+      <div class="meta hint"></div>
+      <button type="button" class="live-play-btn btn-sm primary">▶ Play</button>
+      <canvas width="170" height="170" id="${cvId}"></canvas>`;
     grid.appendChild(wrap);
+    wrap.querySelector(".live-play-btn").onclick = (e) => { e.stopPropagation(); playLiveReplay(i); };
   }
+  wrap.classList.toggle("replay-playing", playing);
+  const btn = wrap.querySelector(".live-play-btn");
+  if (btn) {
+    btn.disabled = !hasFrames;
+    btn.textContent = !hasFrames ? "No data" : (playing ? "■ Stop" : "▶ Play");
+  }
+  const cap = wrap.querySelector(".cap b");
+  if (cap) cap.textContent = ep.enemy;
   const tag = wrap.querySelector(".tag");
   const meta = wrap.querySelector(".meta");
   const tc = ep.result === "mission" ? "win" : (ep.result === "shot_down" ? "lost" : "timeout");
   tag.className = "tag " + tc;
   tag.textContent = ep.result;
   const sc = ep.score != null ? ` · ${fmtScore(ep.score)}` : "";
-  meta.textContent = `${Math.round(ep.steps || 0)} steps${sc}`;
-  const cv = wrap.querySelector("canvas");
-  if (cv && ep.frames && ep.frames.length) {
-    drawFrame(cv.getContext("2d"), ep.frames[0], cv.width, cv.height);
-  }
+  const worst = ep.picked_worst ? " · worst replay" : "";
+  meta.textContent = `${Math.round(ep.steps || ep.mean_steps || 0)} steps${sc}${worst}`;
+  const cv = document.getElementById(cvId);
+  if (cv && hasFrames && !playing) drawFrame(cv.getContext("2d"), ep.frames[0], cv.width, cv.height);
 }
-function buildMatchGrid(episodes) {
-  const grid = $("match-grid");
+function buildMatchGrid(episodes, gridId = "match-grid", idPrefix = "mc") {
+  const grid = $(gridId);
   if (!grid) return;
   grid.innerHTML = "";
-  episodes.forEach((ep, i) => renderEvalCard(ep, i));
+  for (let i = 0; i < episodes.length; i++) {
+    if (episodes[i]) renderEvalCard(episodes[i], i, gridId, idPrefix);
+  }
 }
 function hideEvalProgress() {
   const box = $("eval-progress");
@@ -435,26 +535,6 @@ function applyEvalSummary(ev) {
   hideEvalProgress();
 }
 function handleEvent(ev) {
-  if (ev.type === "replay_start" || ev.type === "replay_frame" || ev.type === "replay_end") {
-    if (ev.run_id !== replayRunId) return;
-    if (ev.type === "replay_start") {
-      replayBuffer.length = 0;
-      replayIdx = 0;
-      if (replayInfoEl) replayInfoEl.textContent = "vs " + ev.enemy;
-    } else if (ev.type === "replay_frame") {
-      replayBuffer.push(ev.frame);
-      if (replayCanvasId) {
-        const cv = $(replayCanvasId);
-        if (cv) drawFrame(cv.getContext("2d"), ev.frame, cv.width, cv.height);
-      }
-    } else if (ev.type === "replay_end") {
-      const r = ev.result || {};
-      if (replayInfoEl) replayInfoEl.textContent = `result: ${r.result || "?"} (reward ${r.reward ?? "-"})`;
-      replayRunId = null;
-      document.querySelectorAll("#post-replay-stop, #detail-replay-stop").forEach((b) => b.classList.add("hidden"));
-    }
-    return;
-  }
   if (watchedRun === null && ev.run_id) watchedRun = ev.run_id;
   if (ev.run_id && ev.run_id !== watchedRun) return;
   if (ev.type === "status") {
@@ -563,16 +643,43 @@ async function deleteRun(id, label) {
   loadAdmin();
 }
 
-function populateReplaySelect(selectId) {
+function populateReplaySelect(selectId, enemies) {
   const sel = $(selectId);
   if (!sel) return;
   sel.innerHTML = "";
-  (ME.enemy_types || []).forEach((e) => {
+  const list = enemies && enemies.length ? enemies : (ME?.enemy_types || []);
+  list.forEach((e) => {
     const opt = document.createElement("option");
     opt.value = e;
     opt.textContent = enemyLabel(e);
     sel.appendChild(opt);
   });
+}
+
+async function loadAnalysisReplays(runId, prefix) {
+  stopAnalysisFrameReplay(prefix);
+  const info = $(`${prefix}-analysis-replay-info`);
+  if (info) info.textContent = "Loading replays…";
+  const res = await fetch(`/api/run/${runId}/analysis/replays`);
+  const data = await res.json();
+  if (!data.ok || !data.replays) {
+    if (info) info.textContent = data.error || "Replays not available for this run.";
+    delete analysisReplayCache[prefix];
+    return;
+  }
+  const enemies = data.enemies?.length ? data.enemies : Object.keys(data.replays);
+  analysisReplayCache[prefix] = { enemies, replays: data.replays };
+  populateReplaySelect(`${prefix}-analysis-replay-enemy`, enemies);
+  showAnalysisReplayPreview(prefix);
+}
+
+function wireAnalysisReplayControls(prefix) {
+  const btn = $(`${prefix}-analysis-replay-btn`);
+  const stopBtn = $(`${prefix}-analysis-replay-stop`);
+  const sel = $(`${prefix}-analysis-replay-enemy`);
+  if (btn) btn.onclick = () => playAnalysisFrameReplay(prefix);
+  if (stopBtn) stopBtn.onclick = () => stopAnalysisFrameReplay(prefix);
+  if (sel) sel.onchange = () => { stopAnalysisFrameReplay(prefix); showAnalysisReplayPreview(prefix); };
 }
 
 function showPostRunPanel(runId) {
@@ -583,7 +690,6 @@ function showPostRunPanel(runId) {
   $("post-run-label").textContent = `#${runId}`;
   $("post-report").innerHTML = "";
   $("post-report-status").textContent = "Analysis runs automatically when training finishes…";
-  populateReplaySelect("post-replay-enemy");
   loadReport(runId, "post");
 }
 
@@ -593,7 +699,6 @@ function openRunDetail(runId) {
   $("run-detail").classList.remove("hidden");
   $("run-detail-label").textContent = `#${runId}`;
   $("detail-report").innerHTML = "";
-  populateReplaySelect("detail-replay-enemy");
   loadReport(runId, "detail");
 }
 
@@ -608,10 +713,10 @@ async function loadReport(runId, prefix) {
   const res = await fetch(`/api/run/${runId}/report`);
   const data = await res.json();
   if (!data.ok) { if (status) status.textContent = data.error || "Could not load report."; return; }
-  renderReport(data, prefix);
+  renderReport(data, prefix, data.run?.id);
 }
 
-function renderReport(data, prefix) {
+function renderReport(data, prefix, runId) {
   const box = $(prefix + "-report");
   const status = $(prefix + "-report-status");
   if (!box) return;
@@ -649,9 +754,27 @@ function renderReport(data, prefix) {
     for (const [enemy, e] of Object.entries(s.per_enemy || {})) {
       html += `<tr><td>${enemy}</td><td>${(e.mission_rate * 100).toFixed(0)}%</td><td>${(e.survival * 100).toFixed(0)}%</td><td>${(e.kills * 100).toFixed(0)}%</td><td>${e.mean_reward}</td><td>${e.missiles_used}</td></tr>`;
     }
-    html += "</table><div class='analysis-plots'>";
-    for (const path of Object.values(data.plots || {})) html += `<img src="${path}?t=${Date.now()}"/>`;
+    html += "</table>";
+    if (data.agent_profile) {
+      html += `<h3>Agent profile map</h3>
+        <p class="hint">Opponent offense/defense profiles (same axes as the training picker). ★ estimates where your learned agent sits.</p>
+        <div class="enemy-map-wrap report-profile-map"><canvas id="${prefix}-profile-map" width="520" height="360"></canvas></div>`;
+    }
+    html += "<div class='analysis-plots'>";
+    for (const [name, path] of Object.entries(data.plots || {})) {
+      if (name === "agent_profile") continue;
+      html += `<img src="${path}?t=${Date.now()}" alt="${name}"/>`;
+    }
     html += "</div>";
+    html += `<h3>Eval replay</h3>
+      <p class="hint">Select one opponent at a time. When eval results differ, the replay shows the worst episode.</p>
+      <div class="run-tools">
+        <select id="${prefix}-analysis-replay-enemy"></select>
+        <button type="button" id="${prefix}-analysis-replay-btn" class="primary btn-sm">Watch replay</button>
+        <button type="button" id="${prefix}-analysis-replay-stop" class="danger btn-sm hidden">Stop</button>
+        <span id="${prefix}-analysis-replay-info" class="hint"></span>
+      </div>
+      <canvas id="${prefix}-analysis-replay" class="replay-canvas" width="420" height="420"></canvas>`;
   } else if (st === "pending") {
     html += `<p class="hint">Analysis is being generated automatically… reopen shortly.</p>`;
   } else if (st === "error") {
@@ -661,6 +784,11 @@ function renderReport(data, prefix) {
   box.innerHTML = html;
   if (status) status.textContent = "";
   drawLearningCurve(`${prefix}-curve`, data.curve || { t: [], reward: [], score: [] });
+  if (data.agent_profile && EnemyPicker.drawProfileMap) {
+    EnemyPicker.drawProfileMap(`${prefix}-profile-map`, data.agent_profile);
+  }
+  wireAnalysisReplayControls(prefix);
+  if (st === "ready" && runId) loadAnalysisReplays(runId, prefix);
 }
 
 function useReportParams(prefix) {
@@ -687,113 +815,86 @@ function applyRunParamsToTrainer(params) {
   window.scrollTo({ top: 0, behavior: "smooth" });
 }
 
-async function startRunReplay(runId, enemySelectId, infoId, canvasId, stopBtnId) {
-  const enemy = $(enemySelectId)?.value || "B1";
-  replayRunId = runId;
-  replayInfoEl = $(infoId);
-  replayCanvasId = canvasId;
-  replayBuffer.length = 0;
-  replayIdx = 0;
-  replayHold = 0;
-  if (replayInfoEl) replayInfoEl.textContent = "loading…";
-  const stopBtn = $(stopBtnId);
-  if (stopBtn) stopBtn.classList.remove("hidden");
-  const res = await postJSON(`/api/run/${runId}/replay/start`, { enemy });
-  if (!res.data.ok) {
-    replayRunId = null;
-    if (replayInfoEl) replayInfoEl.textContent = apiError(res, res.data);
-    if (stopBtn) stopBtn.classList.add("hidden");
-  }
-}
-
-async function stopRunReplay(stopBtnId) {
-  if (detailRunId) await postJSON(`/api/run/${detailRunId}/replay/stop`);
-  else if (lastDoneRunId) await postJSON(`/api/run/${lastDoneRunId}/replay/stop`);
-  replayRunId = null;
-  replayBuffer.length = 0;
-  const stopBtn = $(stopBtnId);
-  if (stopBtn) stopBtn.classList.add("hidden");
-}
-
 // ---------------------------------------------------------------- student report
 const REPORT_FIELDS = [
-  { key: "strategy",
-    label: { en: "1. Strategy", pt: "1. Estratégia" },
+  { key: "feedback_strategy",
+    label: { en: "1. Feedback strategy", pt: "1. Estratégia de Feedbacks" },
     hint: {
-      en: "In 1–2 sentences, what behaviour did you want your agent to learn?",
-      pt: "Em 1–2 frases, que comportamento você queria que seu agente aprendesse?",
+      en: "How did you adjust reward/penalty weights between training runs? What behaviour did you expect, and what happened?",
+      pt: "Explique a estratégia adotada para ajustar os pesos das recompensas e penalidades entre cada processo de treinamento, indicando comportamentos esperados e resultados obtidos.",
     } },
-  { key: "reward_link",
-    label: { en: "2. Reward → behaviour", pt: "2. Recompensa → comportamento" },
+  { key: "final_analysis",
+    label: { en: "2. Final results analysis", pt: "2. Análise dos Resultados Finais" },
     hint: {
-      en: "Which rewards/penalties did you set highest, and why should they produce the behaviour above?",
-      pt: "Quais recompensas/penalidades você definiu como mais altas e por que elas produziriam o comportamento acima?",
-    } },
-  { key: "curve",
-    label: { en: "3. Learning curve", pt: "3. Curva de aprendizado" },
-    hint: {
-      en: "What does your curve show? When did it converge or plateau (roughly which step)?",
-      pt: "O que sua curva mostra? Quando convergiu ou estabilizou (aproximadamente em qual passo)?",
-    } },
-  { key: "results",
-    label: { en: "4. Results", pt: "4. Resultados" },
-    hint: {
-      en: "Explain your mission / kill / missile-efficiency numbers. Which is strongest, which is weakest, and why?",
-      pt: "Explique seus números de missão / abate / eficiência de míssil. Qual é o mais forte, qual o mais fraco, e por quê?",
-    } },
-  { key: "matchups",
-    label: { en: "5. Matchups", pt: "5. Confrontos" },
-    hint: {
-      en: "Which opponents beat your agent and why? Use the context box above.",
-      pt: "Quais oponentes derrotam seu agente e por quê? Use o quadro de contexto acima.",
-    } },
-  { key: "next_step",
-    label: { en: "6. Next improvement", pt: "6. Próxima melhoria" },
-    hint: {
-      en: "What single change would most improve your score next, and what is your reasoning?",
-      pt: "Qual única mudança mais melhoraria sua pontuação, e qual é o seu raciocínio?",
+      en: "Analyse your submitted run (score, charts, replays). What would make the agent more robust?",
+      pt: "Analise o relatório do comportamento final submetido e sugira estratégias que você acredita que poderiam deixá-lo mais robusto.",
     } },
 ];
 
-let reportLang = localStorage.getItem("reportLang") || "en";
+let reportLang = localStorage.getItem("reportLang") || "pt";
 const REPORT_I18N = {
   en: {
-    title: "Activity report", subtitle: "your written analysis — the deliverable beyond the submitted model",
-    intro: "Base your answers on your runs, the analysis charts, replays and your submitted model. Keep answers short and specific. Click Save report to store your work.",
+    title: "Activity report — TE-276",
+    subtitle: "2 short answers based on your submitted run",
+    intro: "Use your runs, analysis charts and replays as evidence. Answer both sections briefly, then click Save report.",
     save: "Save report", placeholder: "Your answer…",
     notSaved: "Not saved yet.", saved: "Saved",
+    contextHint: "No submission yet. Submit your best run on My runs to fill in the score box below.",
+    contextTitle: "Submitted run",
+    contextEvidence: "Use these numbers in your answers.",
+    bestLabel: "Strongest vs", worstLabel: "Weakest vs",
   },
   pt: {
-    title: "Relatório da atividade", subtitle: "sua análise escrita — a entrega além do modelo enviado",
-    intro: "Baseie suas respostas nas suas execuções, nos gráficos de análise, nos replays e no modelo enviado. Seja breve e específico. Clique em Salvar relatório para guardar seu trabalho.",
+    title: "Relatório — TE-276",
+    subtitle: "2 respostas com base no seu run submetido",
+    intro: "Use suas execuções, os gráficos de análise e os replays como evidência. Responda as duas seções com objetividade e clique em Salvar relatório.",
     save: "Salvar relatório", placeholder: "Sua resposta…",
     notSaved: "Ainda não salvo.", saved: "Salvo",
+    contextHint: "Nenhum run submetido ainda. Envie o melhor em Minhas execuções para preencher o quadro abaixo.",
+    contextTitle: "Run submetido",
+    contextEvidence: "Use estes números nas suas respostas.",
+    bestLabel: "Melhor vs", worstLabel: "Pior vs",
   },
 };
 function reportT(k) { return (REPORT_I18N[reportLang] || REPORT_I18N.en)[k]; }
 
+function migrateReportData(data) {
+  if (!data || typeof data !== "object") return {};
+  if (data.feedback_strategy || data.final_analysis) return data;
+  if (data.rewards || data.results || data.improvement) {
+    return {
+      feedback_strategy: [data.rewards, data.improvement].filter(Boolean).join("\n\n").trim(),
+      final_analysis: data.results || "",
+    };
+  }
+  const parts = [];
+  if (data.strategy) parts.push(data.strategy);
+  if (data.reward_link) parts.push(data.reward_link);
+  return {
+    feedback_strategy: parts.join("\n\n").trim(),
+    final_analysis: [data.curve, data.results, data.matchups, data.next_step].filter(Boolean).join("\n\n").trim(),
+  };
+}
+
 function renderReportContext(ctx, containerId) {
   const box = $(containerId);
   if (!box) return;
+  const t = reportT;
   if (!ctx || !ctx.has_submission) {
-    box.innerHTML = `<p class="hint">No submitted run yet. Submit your best run on the <b>My runs</b> tab to populate this context (score, matchups). You can still write the report.</p>`;
+    box.innerHTML = `<p class="hint">${t("contextHint")}</p>`;
     return;
   }
   const pct = (v) => v == null ? "-" : (v * 100).toFixed(0) + "%";
-  const matchRow = (m) => `<span class="chip">${m.enemy} · mission ${pct(m.mission_rate)} · kill ${pct(m.kills)}</span>`;
+  const matchRow = (m) => `<span class="chip">${m.enemy} ${pct(m.mission_rate)}</span>`;
   box.innerHTML = `
-    <p class="hint">Submitted run <b>${ctx.run_uid}</b> · these numbers are your evidence base.</p>
+    <p class="hint"><b>${t("contextTitle")}</b> ${ctx.run_uid} — ${t("contextEvidence")}</p>
     <div class="report-metrics">
       <span><b>${pct(ctx.score)}</b> score</span>
-      <span><b>${pct(ctx.mission_rate)}</b> mission</span>
-      <span><b>${pct(ctx.kill_rate)}</b> kill</span>
-      <span><b>${pct(ctx.survival_rate)}</b> survive</span>
-      <span><b>${ctx.missile_efficiency ?? "-"}</b> missile eff.</span>
-      <span><b>${ctx.mean_reward ?? "-"}</b> reward</span>
-      <span><b>${ctx.steps}</b> steps</span>
+      <span><b>${pct(ctx.mission_rate)}</b> missão</span>
+      <span><b>${pct(ctx.kill_rate)}</b> abate</span>
     </div>
-    ${(ctx.best && ctx.best.length) ? `<p class="hint" style="margin-top:8px">Best matchups: ${ctx.best.map(matchRow).join(" ")}</p>` : ""}
-    ${(ctx.worst && ctx.worst.length) ? `<p class="hint">Worst matchups: ${ctx.worst.map(matchRow).join(" ")}</p>` : ""}`;
+    ${(ctx.worst && ctx.worst.length) ? `<p class="hint">${t("worstLabel")}: ${ctx.worst.map(matchRow).join(" ")}</p>` : ""}
+    ${(ctx.best && ctx.best.length) ? `<p class="hint">${t("bestLabel")}: ${ctx.best.map(matchRow).join(" ")}</p>` : ""}`;
 }
 
 function collectReportValues() {
@@ -805,6 +906,7 @@ function collectReportValues() {
 function buildReportForm(data) {
   const form = $("report-form");
   if (!form) return;
+  data = migrateReportData(data);
   form.innerHTML = REPORT_FIELDS.map((f) => `
     <div class="report-field">
       <label for="rf-${f.key}">${f.label[reportLang] || f.label.en}</label>
@@ -1067,42 +1169,8 @@ function drawAircraft(ctx, ac, color, arena, w, h) {
   ctx.beginPath(); ctx.moveTo(...nose); ctx.lineTo(...left); ctx.lineTo(...right); ctx.closePath(); ctx.fill();
 }
 function tickVisuals() {
-  if (matchEpisodes.length) {
-    const withFrames = matchEpisodes.filter((e) => e && e.frames && e.frames.length);
-    if (withFrames.length) {
-      const maxLen = Math.max(...withFrames.map((e) => e.frames.length));
-      const frameIdx = Math.min(matchIdx, maxLen - 1);
-      matchEpisodes.forEach((ep, i) => {
-        const cv = $("mc" + i);
-        if (!cv || !ep || !ep.frames || !ep.frames.length) return;
-        drawFrame(cv.getContext("2d"), ep.frames[frameIdx], cv.width, cv.height);
-      });
-      if (matchIdx < maxLen - 1) {
-        matchIdx++;
-        matchHold = 0;
-      } else {
-        matchHold++;
-        if (matchHold > MATCH_HOLD_FRAMES) {
-          matchIdx = 0;
-          matchHold = 0;
-        }
-      }
-    }
-  }
-  if (replayBuffer.length && replayCanvasId) {
-    const cv = $(replayCanvasId);
-    if (cv) {
-      const idx = Math.min(replayIdx, replayBuffer.length - 1);
-      drawFrame(cv.getContext("2d"), replayBuffer[idx], cv.width, cv.height);
-      if (replayIdx < replayBuffer.length - 1) {
-        replayIdx++;
-        replayHold = 0;
-      } else if (replayRunId === null) {
-        replayHold++;
-        if (replayHold > REPLAY_HOLD_FRAMES) { replayIdx = 0; replayHold = 0; }
-      }
-    }
-  }
+  if (liveReplayPlaying) liveReplayPlaying = advanceFrameReplay(liveReplayPlaying);
+  if (analysisFrameReplay) analysisFrameReplay = advanceFrameReplay(analysisFrameReplay);
   setTimeout(tickVisuals, 95);
 }
 function drawCurve() {
@@ -1118,9 +1186,5 @@ window.addEventListener("DOMContentLoaded", () => {
   $("admin-save").onclick = () => saveAdmin(false);
   $("admin-save-training")?.addEventListener("click", () => saveAdmin(true));
   $("final-btn").onclick = runFinal;
-  $("post-replay-btn").onclick = () => lastDoneRunId && startRunReplay(lastDoneRunId, "post-replay-enemy", "post-replay-info", "post-replay", "post-replay-stop");
-  $("post-replay-stop").onclick = () => stopRunReplay("post-replay-stop");
-  $("detail-replay-btn").onclick = () => detailRunId && startRunReplay(detailRunId, "detail-replay-enemy", "detail-replay-info", "detail-replay", "detail-replay-stop");
-  $("detail-replay-stop").onclick = () => stopRunReplay("detail-replay-stop");
   setInterval(() => { if (ME && ME.authenticated && $("view-board").classList.contains("active")) loadBoard(); }, 15000);
 });

@@ -313,6 +313,9 @@ class JobManager:
                     "stats": result["stats"],
                     "plots": {name: os.path.basename(path)
                               for name, path in result["plots"].items()},
+                    "replay_enemies": result.get("replay_enemies", []),
+                    "has_replays": bool(result.get("replays")),
+                    "agent_profile": result.get("agent_profile"),
                 }
                 db.update_run(run_id, analysis_json=json.dumps(report), analysis_status="ready")
                 hub.push(user_id, {"type": "report", "run_id": run_id, "state": "ready"})
@@ -626,10 +629,18 @@ async def run_report(run_id: int, sid: Optional[str] = Cookie(None)):
     analysis_status = run.get("analysis_status")
     report = json.loads(run["analysis_json"]) if run.get("analysis_json") else None
     stats = plots = None
+    replay_enemies = []
+    has_replays = False
+    agent_profile = None
     if report and "stats" in report:
         stats = report["stats"]
+        skip_plots = {"heatmap", "trajectory_heatmap"}
         plots = {name: f"/api/run/{run_id}/analysis/{os.path.basename(fn)}"
-                 for name, fn in (report.get("plots") or {}).items()}
+                 for name, fn in (report.get("plots") or {}).items()
+                 if name not in skip_plots}
+        replay_enemies = report.get("replay_enemies") or list((stats.get("per_enemy") or {}).keys())
+        has_replays = bool(report.get("has_replays"))
+        agent_profile = report.get("agent_profile")
 
     return {
         "ok": True,
@@ -647,7 +658,29 @@ async def run_report(run_id: int, sid: Optional[str] = Cookie(None)):
         "analysis_status": analysis_status,
         "stats": stats,
         "plots": plots,
+        "replay_enemies": replay_enemies,
+        "has_replays": has_replays,
+        "agent_profile": agent_profile,
         "error": report.get("error") if report else None,
+    }
+
+
+@app.get("/api/run/{run_id}/analysis/replays")
+async def analysis_replays(run_id: int, sid: Optional[str] = Cookie(None)):
+    """Subsampled replay frames for every locked eval opponent (analysis pass)."""
+    user = current_user(sid)
+    if user is None:
+        return JSONResponse({"error": "auth"}, status_code=403)
+    if _user_run(user, run_id) is None:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    from bvr.analysis import load_replays
+    replays = load_replays(os.path.join(ANALYSIS_DIR, f"run_{run_id}"))
+    if replays is None:
+        return JSONResponse({"ok": False, "error": "Replays not found."}, status_code=404)
+    return {
+        "ok": True,
+        "enemies": replays.get("enemies", []),
+        "replays": replays.get("replays", replays),
     }
 
 
@@ -832,17 +865,32 @@ async def admin_export_reports(sid: Optional[str] = Cookie(None)):
     one JSON file, for offline grading/review."""
     if _require_admin(sid) is None:
         return JSONResponse({"error": "admin only"}, status_code=403)
-    fields = ["strategy", "reward_link", "curve", "results", "matchups", "next_step"]
+    fields = ["feedback_strategy", "final_analysis"]
+    legacy = {"strategy", "reward_link", "curve", "matchups", "next_step", "rewards", "results", "improvement"}
     out = []
     for u in db.list_users():
         if u.get("is_admin"):
             continue
         rep = db.get_user_report(u["id"])
         data = json.loads(rep["data"]) if rep else {}
+        if not any(data.get(k) for k in fields) and any(data.get(k) for k in legacy):
+            if data.get("rewards") or data.get("improvement"):
+                report = {
+                    "feedback_strategy": "\n\n".join(p for p in [data.get("rewards"), data.get("improvement")] if p).strip(),
+                    "final_analysis": data.get("results", ""),
+                }
+            else:
+                parts_r = [data.get("strategy", ""), data.get("reward_link", "")]
+                report = {
+                    "feedback_strategy": "\n\n".join(p for p in parts_r if p).strip(),
+                    "final_analysis": "\n\n".join(p for p in [data.get("curve"), data.get("results"), data.get("matchups"), data.get("next_step")] if p).strip(),
+                }
+        else:
+            report = {k: data.get(k, "") for k in fields}
         out.append({
             "user": u["name"],
             "updated_at": rep["updated_at"] if rep else None,
-            "report": {k: data.get(k, "") for k in fields},
+            "report": report,
             "submission": _report_context(u["id"]),
         })
     payload = {"exported_at": time.time(), "students": out}

@@ -1,0 +1,179 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[brazil]{babel}
+\usepackage{geometry}
+\usepackage{hyperref}
+\usepackage{enumitem}
+\usepackage{booktabs}
+\usepackage{xcolor}
+
+\geometry{margin=2.5cm}
+\hypersetup{colorlinks=true, linkcolor=blue!60!black, urlcolor=blue!60!black}
+
+\title{\textbf{Atividade prática — Reinforcement Learning aplicado a combate BVR}\\[0.4em]
+\large Disciplina TE-276}
+\author{Plataforma online BVR Lab}
+\date{Junho de 2026}
+
+\begin{document}
+\maketitle
+
+\section*{Informações da disciplina}
+\begin{tabular}{@{}ll@{}}
+  \toprule
+  \textbf{Disciplina} & TE-276 \\
+  \textbf{Atividade} & Projeto de função de recompensa para missão ar-ar BVR \\
+  \textbf{Plataforma} & \url{https://bvrlabonline.conceptio.com.br} \\
+  \textbf{Código de turma} & Fornecido pelo professor (padrão: \texttt{BVR2026}) \\
+  \bottomrule
+\end{tabular}
+
+\section{Objetivo}
+Você \textbf{não} vai programar o algoritmo de aprendizado (PPO) nem alterar a rede neural.
+Sua tarefa é atuar como \textbf{designer da missão}: definir pesos de recompensas e penalidades
+para que um agente fixo aprenda a completar uma missão \emph{Beyond Visual Range} (BVR):
+\textbf{alcançar a zona de objetivo vivo}, enfrentando oponentes inteligentes.
+
+\section{O que está fixo vs.\ o que você controla}
+\begin{tabular}{@{}p{0.45\textwidth}p{0.45\textwidth}@{}}
+  \toprule
+  \textbf{Você pode alterar} & \textbf{Bloqueado (não editar)} \\
+  \midrule
+  Pesos em recompensas e penalidades & Arquitetura da rede neural \\
+  Seleção de oponentes para treino & Algoritmo PPO e hiperparâmetros \\
+  Número de passos (dentro da cota) & Física do simulador \\
+  & Oponentes oficiais da competição (B1--B10 + arquetipos) \\
+  \bottomrule
+\end{tabular}
+
+\section{Pontuação oficial}
+Após cada treino, o sistema avalia seu modelo contra \textbf{todos} os oponentes bloqueados.
+A nota da competição usa:
+\[
+  \text{score} = 0{,}6 \times \text{missão} + 0{,}25 \times \text{abate} + 0{,}15 \times \text{eficiência de míssil}
+\]
+\begin{itemize}[nosep]
+  \item \textbf{Missão}: chegar à zona verde \textbf{vivo} (objetivo principal).
+  \item \textbf{Abate}: derrubar o inimigo ajuda a sobreviver, mas não substitui a missão.
+  \item \textbf{Eficiência de míssil}: relação entre abates e mísseis disparados.
+\end{itemize}
+
+\section{Passo a passo na plataforma}
+
+\subsection*{Passo 1 — Acesso e cadastro}
+\begin{enumerate}[label=\textbf{\arabic*.}]
+  \item Abra \url{https://bvrlabonline.conceptio.com.br}.
+  \item Clique em \textbf{Register} e crie sua conta (nome, senha, código da turma).
+  \item Faça \textbf{Login}. Observe sua \textbf{cota} no topo (número limitado de treinos por janela de tempo).
+\end{enumerate}
+
+\subsection*{Passo 2 — Configurar recompensas e oponentes (\emph{Train})}
+No painel esquerdo da aba \textbf{Train}:
+\begin{enumerate}[label=\textbf{\arabic*.},start=4]
+  \item Ajuste os pesos de recompensa/penalidade (valor \textbf{0} desliga o termo).
+  \item No mapa de oponentes, selecione quem usar no treino (B1--B10 e arquetipos). Prioridade 0 remove o oponente.
+  \item Clique em \textbf{Queue training run}.
+\end{enumerate}
+
+\textbf{Dica:} comece com os valores padrão, rode uma vez, depois mude \textbf{um} termo por vez.
+
+\subsection*{Passo 3 — Acompanhar o treino (\emph{Train}, painel direito)}
+Durante a execução, observe:
+\begin{itemize}[nosep]
+  \item \textbf{progress} — avanço do treino;
+  \item \textbf{avg score} — desempenho nas avaliações de monitoramento;
+  \item \textbf{train reward} — recompensa média durante o aprendizado;
+  \item \textbf{Live eval} — um card por oponente avaliado; clique em \textbf{▶ Play} no card para ver o replay (um por vez);
+  \item \textbf{Abas Epoch} — clique em \emph{Epoch 1, 2, \ldots} para rever avaliações anteriores; use \emph{live} para a avaliação em andamento;
+  \item \textbf{Learning curve} — linha verde subindo indica que sua função de recompensa está funcionando.
+\end{itemize}
+
+\subsection*{Passo 4 — Analisar o run concluído}
+Quando o status for \textbf{done}, o painel \textbf{Run complete} e o relatório em \textbf{My runs} $\rightarrow$ \textbf{view report} mostram automaticamente:
+\begin{enumerate}[label=\textbf{\arabic*.},start=7]
+  \item \textbf{Parâmetros usados} — oponentes, passos e pesos de recompensa.
+  \item \textbf{Curva de aprendizado} e \textbf{relatório de análise} — score, tabela por oponente e gráficos (contribuição das recompensas, eficiência de míssil, etc.).
+  \item \textbf{Mapa de perfil dos agentes} — posição ofensiva/defensiva dos oponentes e estimativa de onde seu agente aprendido se situa (★).
+  \item \textbf{Eval replay} — escolha \textbf{um oponente por vez} no menu e clique em \textbf{Watch replay}. Se os episódios de avaliação tiverem resultados diferentes, o replay mostra o \textbf{pior caso} (útil para diagnosticar falhas).
+\end{enumerate}
+
+\subsection*{Passo 5 — Enviar o melhor modelo (\emph{My runs})}
+\begin{enumerate}[label=\textbf{\arabic*.},start=11]
+  \item Vá à aba \textbf{My runs}.
+  \item Compare \textbf{score}, \textbf{mission}, \textbf{kill} e \textbf{reward}.
+  \item Clique em \textbf{submit} no seu melhor run (\textbf{apenas um} conta no ranking).
+  \item Use \textbf{view report} para abrir o relatório completo de qualquer execução.
+\end{enumerate}
+
+\subsection*{Passo 6 — Preencher o relatório (\emph{Report})}
+\begin{enumerate}[label=\textbf{\arabic*.},start=15]
+  \item Abra a aba \textbf{Report}.
+  \item Responda às \textbf{2 perguntas} (veja seção~\ref{sec:relatorio}).
+  \item Clique em \textbf{Salvar relatório} antes do prazo.
+\end{enumerate}
+
+\subsection*{Passo 7 — Ranking (\emph{Leaderboard})}
+\begin{enumerate}[label=\textbf{\arabic*.},start=18]
+  \item Confira sua posição na aba \textbf{Leaderboard}.
+  \item O ranking usa o score oficial contra o conjunto bloqueado de oponentes.
+\end{enumerate}
+
+\section{Termos de recompensa (referência rápida)}
+\begin{tabular}{@{}p{0.28\textwidth}p{0.62\textwidth}@{}}
+  \toprule
+  \textbf{Termo} & \textbf{Significado} \\
+  \midrule
+  \texttt{mission\_completed} & Bônus grande por completar a missão vivo \\
+  \texttt{hit\_enemy} & Bônus por abater o inimigo \\
+  \texttt{was\_hit} & Penalidade ao ser abatido (mantenha negativo) \\
+  \texttt{fire\_missile} / \texttt{miss\_missile} & Custo de disparo / tiro errado \\
+  \texttt{mission\_shaping} & Recompensa por progresso em direção ao objetivo \\
+  \texttt{maintain\_track} / \texttt{lost\_track} & Manter / perder radar no alvo \\
+  \texttt{closing\_bonus} / \texttt{wez\_advantage} & Aproximação / vantagem de alcance \\
+  \bottomrule
+\end{tabular}
+
+\section{Entregáveis}
+\begin{enumerate}[label=\textbf{E\arabic*.}]
+  \item \textbf{Modelo submetido} — melhor run enviado via \emph{My runs} $\rightarrow$ \emph{submit}.
+  \item \textbf{Relatório} — formulário da aba \emph{Report} (2 respostas objetivas).
+  \item \textbf{Participação no ranking} — score visível na aba \emph{Leaderboard}.
+\end{enumerate}
+
+\section{Relatório simplificado}\label{sec:relatorio}
+Preencha com base nos gráficos, no mapa de perfil, nos replays e no run submetido. Seja \textbf{objetivo}.
+
+\begin{enumerate}[label=\textbf{R\arabic*.}]
+  \item \textbf{Estratégia de Feedbacks} — Como você ajustou os pesos de recompensa e penalidade entre cada treino? Que comportamento esperava e o que obteve?
+  \item \textbf{Análise dos Resultados Finais} — Analise o comportamento do run submetido (score, curva, mapa de perfil, replays, oponentes) e sugira o que tornaria o agente mais robusto.
+\end{enumerate}
+
+\section{Erros comuns}
+\begin{itemize}[nosep]
+  \item Priorizar abate em detrimento da missão $\rightarrow$ agente luta, mas não completa o objetivo.
+  \item Zerar todos os termos de \emph{shaping} $\rightarrow$ aprendizado muito lento no início.
+  \item Ignorar replays $\rightarrow$ perde a causa das derrotas (rota errada, disparo precoce, etc.).
+  \item Esquecer de \textbf{submit} e \textbf{salvar} o relatório.
+\end{itemize}
+
+\section{Suporte}
+\begin{tabular}{@{}ll@{}}
+  \toprule
+  Problema & Ação \\
+  \midrule
+  Cota esgotada & Aguardar a janela de tempo ou falar com o professor \\
+  Página desatualizada & Atualização forçada: Ctrl+F5 \\
+  Replay no Live eval não anima & Clique em \textbf{▶ Play} no card do oponente desejado \\
+  Replay no relatório não aparece & Aguarde \emph{report ready}; só runs concluídos após a atualização têm replays gravados \\
+  \bottomrule
+\end{tabular}
+
+\vfill
+\begin{center}
+  \small \textbf{Disciplina TE-276} — BVR Reinforcement Learning Lab\\
+  Dashboard local (opcional): \url{https://bvrlab.conceptio.com.br}
+\end{center}
+
+\end{document}

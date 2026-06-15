@@ -180,5 +180,64 @@ const EnemyPicker = (() => {
     draw();
   }
 
-  return { render, getSelected, setSelected, selectAll, selectNone };
+  function drawProfileMap(canvasId, profile) {
+    const canvas = document.getElementById(canvasId);
+    if (!canvas || !profile) return;
+    const ctx = canvas.getContext("2d");
+    const opponents = profile.opponents || [];
+    const student = profile.student || {};
+    const w = canvas.width;
+    const h = canvas.height;
+    const pad = { l: 36, r: 12, t: 14, b: 28 };
+    const plotW = w - pad.l - pad.r;
+    const plotH = h - pad.t - pad.b;
+    ctx.clearRect(0, 0, w, h);
+    ctx.fillStyle = "#0d1322";
+    ctx.fillRect(0, 0, w, h);
+    if (!opponents.length) return;
+    const points = opponents.map((p) => ({
+      name: p.name, x: Number(p.offense ?? 0), y: Number(p.defense ?? 0), score: Number(p.score ?? 5),
+    }));
+    const xs = points.map((p) => p.x);
+    const ys = points.map((p) => p.y);
+    const minX = Math.min(...xs, Number(student.offense ?? 0)) - 0.08;
+    const maxX = Math.max(...xs, Number(student.offense ?? 0)) + 0.08;
+    const minY = Math.min(...ys, Number(student.defense ?? 0)) - 0.08;
+    const maxY = Math.max(...ys, Number(student.defense ?? 0)) + 0.08;
+    const scores = points.map((p) => p.score);
+    const minS = Math.min(...scores);
+    const maxS = Math.max(...scores);
+    const toPx = (x, y) => ({
+      px: pad.l + ((x - minX) / (maxX - minX || 1)) * plotW,
+      py: pad.t + plotH - ((y - minY) / (maxY - minY || 1)) * plotH,
+    });
+    ctx.strokeStyle = "#28324a";
+    ctx.strokeRect(pad.l, pad.t, plotW, plotH);
+    ctx.fillStyle = "#8b97ad";
+    ctx.font = "10px Segoe UI, sans-serif";
+    ctx.fillText("Defense ↑", 4, pad.t + 10);
+    ctx.fillText("Offense →", pad.l, h - 8);
+    points.forEach((pt) => {
+      const { px, py } = toPx(pt.x, pt.y);
+      ctx.beginPath();
+      ctx.arc(px, py, 9, 0, Math.PI * 2);
+      ctx.fillStyle = scoreColor(pt.score, minS, maxS);
+      ctx.fill();
+      ctx.strokeStyle = "#28324a";
+      ctx.stroke();
+      ctx.fillStyle = "#e6ecf5";
+      ctx.font = "bold 10px ui-monospace, monospace";
+      ctx.textAlign = "center";
+      ctx.fillText(pt.name, px, py + 3);
+      ctx.textAlign = "left";
+    });
+    const st = toPx(Number(student.offense ?? 0), Number(student.defense ?? 0));
+    ctx.fillStyle = "#4c9be8";
+    ctx.font = "22px Segoe UI, sans-serif";
+    ctx.textAlign = "center";
+    ctx.fillText("★", st.px, st.py + 7);
+    ctx.textAlign = "left";
+  }
+
+  return { render, drawProfileMap, getSelected, setSelected, selectAll, selectNone };
 })();

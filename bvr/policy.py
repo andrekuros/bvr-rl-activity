@@ -15,24 +15,7 @@ from typing import Dict, Optional
 
 from stable_baselines3 import PPO
 
-from .training_config import resolve_training
-
-# Fixed actor/critic architecture (two hidden layers of 128 units, tanh).
-POLICY_KWARGS = dict(net_arch=dict(pi=[128, 128], vf=[128, 128]))
-
-# Fixed PPO hyperparameters. These are part of the "locked" contract.
-PPO_HYPERPARAMS = dict(
-    learning_rate=3e-4,
-    n_steps=2048,
-    batch_size=256,
-    n_epochs=10,
-    gamma=0.99,
-    gae_lambda=0.95,
-    clip_range=0.2,
-    ent_coef=0.0,
-    vf_coef=0.5,
-    max_grad_norm=0.5,
-)
+from .training_config import PPO_HYPERPARAMS, POLICY_KWARGS, resolve_training
 
 
 def make_model(env, seed: Optional[int] = 0, tensorboard_log: Optional[str] = None,

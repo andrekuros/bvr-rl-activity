@@ -139,6 +139,8 @@ def run_eval_episodes(model, reward_config: Dict, scenario: Dict,
                       episodes_per_enemy: int = 1, with_frames: bool = True,
                       on_progress: Optional[Callable] = None) -> List[Dict]:
     """Run one (or N) deterministic episode(s) per enemy for live monitoring."""
+    from .evaluate import pick_replay_episode_index
+
     episodes_per_enemy = max(1, int(episodes_per_enemy))
     total = len(enemies) * episodes_per_enemy
     finished = 0
@@ -146,17 +148,31 @@ def run_eval_episodes(model, reward_config: Dict, scenario: Dict,
 
     for i, enemy in enumerate(enemies):
         runs: List[Dict] = []
-        sample_frames: List[Dict] = []
-        for j in range(episodes_per_enemy):
+        if episodes_per_enemy == 1:
             ep = _run_one_eval_episode(
                 model, reward_config, scenario, enemy,
-                seed=seed + i * 1000 + j,
-                with_frames=with_frames and j == 0,
+                seed=seed + i * 1000,
+                with_frames=with_frames,
             )
-            runs.append(ep)
-            if ep.get("frames"):
-                sample_frames = ep["frames"]
+            runs = [ep]
+            sample_frames = ep.get("frames") or []
             finished += 1
+        else:
+            for j in range(episodes_per_enemy):
+                ep = _run_one_eval_episode(
+                    model, reward_config, scenario, enemy,
+                    seed=seed + i * 1000 + j,
+                    with_frames=False,
+                )
+                runs.append(ep)
+                finished += 1
+            j_replay = pick_replay_episode_index(runs)
+            replay_ep = _run_one_eval_episode(
+                model, reward_config, scenario, enemy,
+                seed=seed + i * 1000 + j_replay,
+                with_frames=with_frames,
+            )
+            sample_frames = replay_ep.get("frames") or []
 
         missions = int(sum(r["win"] for r in runs))
         kills = int(sum(r.get("kill", 0) for r in runs))
@@ -167,10 +183,14 @@ def run_eval_episodes(model, reward_config: Dict, scenario: Dict,
         mean_score = competition_score(mission_rate, kill_rate, eff)
         mean_reward = float(np.mean([r["reward"] for r in runs]))
         mean_steps = float(np.mean([r["steps"] for r in runs]))
-        last = runs[-1]
+        replay_result = runs[0]["result"]
+        j_replay = 0
+        if episodes_per_enemy > 1:
+            j_replay = pick_replay_episode_index(runs)
+            replay_result = replay_ep["result"]
         summary = {
             "enemy": enemy,
-            "result": last["result"],
+            "result": replay_result,
             "win": float(mission_rate),
             "mission_rate": round(mission_rate, 3),
             "kill_rate": round(kill_rate, 3),
@@ -184,6 +204,8 @@ def run_eval_episodes(model, reward_config: Dict, scenario: Dict,
             "steps": round(mean_steps, 1),
             "mean_steps": round(mean_steps, 1),
             "blue_missiles_used": round(float(np.mean([r["blue_missiles_used"] for r in runs])), 2),
+            "replay_episode": j_replay + 1,
+            "picked_worst": len({r.get("result") for r in runs}) > 1,
             "frames": sample_frames,
         }
         summaries.append(summary)
@@ -198,7 +220,7 @@ def run_eval_episodes(model, reward_config: Dict, scenario: Dict,
                 "enemy_index": i + 1,
                 "enemy_total": len(enemies),
                 "running_enemy": enemy,
-                "last_result": last["result"],
+                "last_result": replay_result,
                 "enemy_done": True,
                 "enemy_summary": light,
             })

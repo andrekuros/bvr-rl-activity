@@ -19,6 +19,24 @@ from .enemies import SELECTABLE_TYPES, eval_enemy_pool, training_enemy_pool
 from .scoring import SCORE_FORMULA_LABEL, competition_score
 from .train import DEFAULT_MODEL_PATH, load_configs
 
+RESULT_RANK = {"shot_down": 0, "timeout": 1, "mission": 2}
+
+
+def pick_replay_episode_index(episodes: List[Dict]) -> int:
+    """When eval outcomes differ, pick the most negative episode for replay."""
+    if not episodes:
+        return 0
+    outcomes = {e.get("result") for e in episodes}
+    if len(outcomes) <= 1:
+        return 0
+
+    def rank(i: int):
+        ep = episodes[i]
+        r = ep.get("result", "timeout")
+        return (RESULT_RANK.get(r, 1), float(ep.get("reward", 0)))
+
+    return min(range(len(episodes)), key=rank)
+
 
 def load_model(model_path: str) -> PPO:
     return PPO.load(model_path, device="cpu")

@@ -217,7 +217,10 @@ async def run_analysis():
     from bvr.analysis import analyze_model
     result = analyze_model(DEFAULT_MODEL_PATH, episodes_per_enemy=10)
     plots = {name: "/analysis/" + os.path.basename(path) for name, path in result["plots"].items()}
-    return {"ok": True, "stats": result["stats"], "plots": plots}
+    return {"ok": True, "stats": result["stats"], "plots": plots,
+            "replays": result.get("replays", {}),
+            "replay_enemies": result.get("replay_enemies", []),
+            "agent_profile": result.get("agent_profile")}
 
 
 @app.get("/analysis/{name}")

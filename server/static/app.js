@@ -118,6 +118,11 @@ async function startReplay() {
   if (!data.ok) $("replay-info").textContent = data.error || "error";
 }
 
+let analysisReplayEpisodes = [];
+let analysisReplaySelected = 0;
+let analysisReplayIdx = 0;
+let analysisReplayHold = 0;
+
 async function runAnalysis() {
   const btn = $("analysis-btn");
   btn.disabled = true; btn.textContent = "Running...";
@@ -132,10 +137,66 @@ async function runAnalysis() {
   for (const [enemy, e] of Object.entries(s.per_enemy)) {
     html += `<tr><td>${enemy}</td><td>${(e.mission_rate*100).toFixed(0)}%</td><td>${(e.survival*100).toFixed(0)}%</td><td>${(e.kills*100).toFixed(0)}%</td><td>${e.mean_reward}</td><td>${e.missiles_used}</td></tr>`;
   }
-  html += "</table><div>";
-  for (const path of Object.values(data.plots)) html += `<img src="${path}?t=${Date.now()}"/>`;
+  html += "</table>";
+  if (data.agent_profile) {
+    html += `<h3>Agent profile map</h3>
+      <p class="hint">Opponent profiles and estimated learned-agent position (★).</p>
+      <div class="enemy-map-wrap"><canvas id="analysis-profile-map" width="520" height="360"></canvas></div>`;
+  }
+  html += "<div class='analysis-plots'>";
+  for (const [name, path] of Object.entries(data.plots)) {
+    if (name === "heatmap" || name === "trajectory_heatmap" || name === "agent_profile") continue;
+    html += `<img src="${path}?t=${Date.now()}"/>`;
+  }
   html += "</div>";
+  html += `<h3>Eval replays <small>all locked opponents</small></h3>
+    <p class="hint">One episode per opponent (same seed as eval). Click a card to play.</p>
+    <div id="analysis-replay-grid" class="match-grid"></div>`;
   out.innerHTML = html;
+  const enemies = data.replay_enemies || Object.keys(data.replays || {});
+  analysisReplayEpisodes = enemies.map((e) => (data.replays[e] || data.replays?.replays?.[e])).filter(Boolean);
+  analysisReplaySelected = 0;
+  analysisReplayIdx = 0;
+  analysisReplayHold = 0;
+  buildAnalysisReplayGrid();
+  if (data.agent_profile && EnemyPicker.drawProfileMap) {
+    EnemyPicker.drawProfileMap("analysis-profile-map", data.agent_profile);
+  }
+  const sel = $("replay-enemy");
+  if (sel && enemies.length) {
+    sel.innerHTML = "";
+    enemies.forEach((e) => {
+      const opt = document.createElement("option");
+      opt.value = e; opt.textContent = e;
+      sel.appendChild(opt);
+    });
+  }
+}
+
+function buildAnalysisReplayGrid() {
+  const grid = $("analysis-replay-grid");
+  if (!grid) return;
+  grid.innerHTML = "";
+  analysisReplayEpisodes.forEach((ep, i) => {
+    if (!ep) return;
+    const wrap = document.createElement("div");
+    wrap.className = "match replay-card" + (i === analysisReplaySelected ? " replay-selected" : "");
+    wrap.onclick = () => {
+      analysisReplaySelected = i;
+      analysisReplayIdx = 0;
+      analysisReplayHold = 0;
+      buildAnalysisReplayGrid();
+    };
+    const evalMr = ep.mission_rate != null ? ` · eval ${(ep.mission_rate * 100).toFixed(0)}% mission` : "";
+    wrap.innerHTML = `<div class="cap"><b>${ep.enemy}</b><span class="tag ${ep.result === "mission" ? "win" : ep.result === "shot_down" ? "lost" : "timeout"}">${ep.result}</span></div>
+      <div class="meta hint">replay: ${ep.result}${evalMr} · ${Math.round(ep.steps || 0)} steps</div>
+      <canvas width="180" height="180" id="arc${i}"></canvas>`;
+    grid.appendChild(wrap);
+    const cv = $("arc" + i);
+    if (cv && ep.frames?.length && i !== analysisReplaySelected) {
+      drawFrame(cv.getContext("2d"), ep.frames[0], cv.width, cv.height);
+    }
+  });
 }
 
 // --------------------------------------------------------------------------
@@ -210,7 +271,7 @@ function renderEpochTabs() {
 function selectEpoch(idx) {
   selectedEpochIdx = idx;
   if (idx === -1) {
-    matchEpisodes = evalLiveEpisodes.filter(Boolean).map((e) => ({ ...e }));
+    matchEpisodes = evalLiveEpisodes.map((e) => (e ? { ...e } : undefined));
   } else {
     matchEpisodes = evalEpochs[idx].episodes.map((e) => ({ ...e }));
   }
@@ -263,9 +324,11 @@ function showEvalProgress(ev) {
   box.classList.remove("hidden");
   if (ev.state === "starting") {
     evalLiveEpisodes = [];
+    matchEpisodes = [];
     liveEpochId = ev.eval_epoch || evalEpochs.length + 1;
     selectedEpochIdx = -1;
     matchIdx = 0;
+    matchHold = 0;
     if ($("match-grid")) $("match-grid").innerHTML = "";
     if ($("eval-overall")) $("eval-overall").textContent = "Running eval pass…";
     renderEpochTabs();
@@ -286,9 +349,9 @@ function showEvalProgress(ev) {
   }
   if (ev.enemy_done && ev.enemy_summary) {
     const idx = (ev.enemy_index || 1) - 1;
-    evalLiveEpisodes[idx] = ev.enemy_summary;
+    evalLiveEpisodes[idx] = { ...ev.enemy_summary };
     if (selectedEpochIdx === -1) {
-      matchEpisodes[idx] = ev.enemy_summary;
+      matchEpisodes[idx] = { ...ev.enemy_summary };
       renderEvalCard(ev.enemy_summary, idx);
     }
     const avg = avgEvalScore(evalLiveEpisodes);
@@ -327,7 +390,29 @@ function buildMatchGrid(episodes) {
   const grid = $("match-grid");
   if (!grid) return;
   grid.innerHTML = "";
-  episodes.forEach((ep, i) => renderEvalCard(ep, i));
+  for (let i = 0; i < episodes.length; i++) {
+    if (episodes[i]) renderEvalCard(episodes[i], i);
+  }
+}
+
+function animateEpisodeGrid(episodes, idx, hold) {
+  let maxLen = 0;
+  for (let i = 0; i < episodes.length; i++) {
+    const ep = episodes[i];
+    if (ep?.frames?.length) maxLen = Math.max(maxLen, ep.frames.length);
+  }
+  if (!maxLen) return { idx, hold };
+  const frameIdx = Math.min(idx, maxLen - 1);
+  for (let i = 0; i < episodes.length; i++) {
+    const ep = episodes[i];
+    const cv = $("mc" + i);
+    if (!cv || !ep?.frames?.length) continue;
+    drawFrame(cv.getContext("2d"), ep.frames[frameIdx], cv.width, cv.height);
+  }
+  if (idx < maxLen - 1) return { idx: idx + 1, hold: 0 };
+  hold += 1;
+  if (hold > MATCH_HOLD_FRAMES) return { idx: 0, hold: 0 };
+  return { idx, hold };
 }
 
 function hideEvalProgress() {
@@ -461,23 +546,21 @@ function drawAircraft(ctx, ac, color, arena, w, h) {
 
 function tickVisuals() {
   if (matchEpisodes.length) {
-    const withFrames = matchEpisodes.filter((e) => e && e.frames && e.frames.length);
-    if (withFrames.length) {
-      const maxLen = Math.max(...withFrames.map((e) => e.frames.length));
-      const frameIdx = Math.min(matchIdx, maxLen - 1);
-      matchEpisodes.forEach((ep, i) => {
-        const cv = $("mc" + i);
-        if (!cv || !ep || !ep.frames || !ep.frames.length) return;
+    const state = animateEpisodeGrid(matchEpisodes, matchIdx, matchHold);
+    matchIdx = state.idx;
+    matchHold = state.hold;
+  }
+  if (analysisReplayEpisodes.length) {
+    const ep = analysisReplayEpisodes[analysisReplaySelected];
+    if (ep?.frames?.length) {
+      const cv = $("arc" + analysisReplaySelected);
+      if (cv) {
+        const frameIdx = Math.min(analysisReplayIdx, ep.frames.length - 1);
         drawFrame(cv.getContext("2d"), ep.frames[frameIdx], cv.width, cv.height);
-      });
-      if (matchIdx < maxLen - 1) {
-        matchIdx++;
-        matchHold = 0;
-      } else {
-        matchHold++;
-        if (matchHold > MATCH_HOLD_FRAMES) {
-          matchIdx = 0;
-          matchHold = 0;
+        if (analysisReplayIdx < ep.frames.length - 1) { analysisReplayIdx++; analysisReplayHold = 0; }
+        else {
+          analysisReplayHold++;
+          if (analysisReplayHold > MATCH_HOLD_FRAMES) { analysisReplayIdx = 0; analysisReplayHold = 0; }
         }
       }
     }

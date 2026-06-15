@@ -273,6 +273,32 @@ def training_enemy_pool() -> list:
     return list(SELECTABLE_TYPES)
 
 
+def eval_enemy_catalog() -> Dict:
+    """Catalog metadata for every locked eval opponent (profile map)."""
+    names = eval_enemy_pool()
+    refs = load_reference_enemies()
+    info = {}
+    for i, n in enumerate(names):
+        if n in refs:
+            r = refs[n]
+            info[n] = {
+                "rank": int(r.get("rank", i + 1)),
+                "score": float(r.get("score", 0)),
+                "kind": "reference",
+                "label": n,
+                "params": {
+                    "shot_frac": float(r.get("shot_frac", 0.9)),
+                    "crank_frac": float(r.get("crank_frac", 0.9)),
+                    "break_dist": float(r.get("break_dist", 30.0)),
+                    "aggressive": bool(r.get("aggressive", True)),
+                    "can_fire": bool(r.get("can_fire", True)),
+                },
+            }
+        else:
+            info[n] = _catalog_entry(n, i + 1)
+    return {"mode": "eval", "names": names, "info": info}
+
+
 def eval_enemy_pool() -> list:
     """Fixed opponent set for locked scoring / final competition: every
     reference plus every static FSM archetype (students cannot change this)."""

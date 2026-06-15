@@ -133,6 +133,8 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 
 .match-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 12px; }
 .match { background: #0d1322; border: 1px solid var(--line); border-radius: 8px; padding: 6px; }
+.match.replay-card { cursor: pointer; }
+.match.replay-card.replay-selected { border-color: #4c9be8; }
 .match .cap { display: flex; justify-content: space-between; font-size: 12px; margin-bottom: 4px; }
 .match canvas { width: 100%; height: auto; display: block; border-radius: 4px; }
 .tag { font-size: 11px; padding: 1px 7px; border-radius: 10px; }

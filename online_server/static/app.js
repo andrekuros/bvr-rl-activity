@@ -838,6 +838,9 @@ const REPORT_I18N = {
     subtitle: "2 short answers based on your submitted run",
     intro: "Use your runs, analysis charts and replays as evidence. Answer both sections briefly, then click Save report.",
     save: "Save report", placeholder: "Your answer…",
+    downloadPdf: "Download PDF report",
+    pdfReady: "PDF ready.",
+    pdfFailed: "Report saved, but PDF generation failed.",
     notSaved: "Not saved yet.", saved: "Saved",
     contextHint: "No submission yet. Submit your best run on My runs to fill in the score box below.",
     contextTitle: "Submitted run",
@@ -849,6 +852,9 @@ const REPORT_I18N = {
     subtitle: "2 respostas com base no seu run submetido",
     intro: "Use suas execuções, os gráficos de análise e os replays como evidência. Responda as duas seções com objetividade e clique em Salvar relatório.",
     save: "Salvar relatório", placeholder: "Sua resposta…",
+    downloadPdf: "Baixar relatório PDF",
+    pdfReady: "PDF gerado.",
+    pdfFailed: "Relatório salvo, mas falhou ao gerar o PDF.",
     notSaved: "Ainda não salvo.", saved: "Salvo",
     contextHint: "Nenhum run submetido ainda. Envie o melhor em Minhas execuções para preencher o quadro abaixo.",
     contextTitle: "Run submetido",
@@ -934,12 +940,25 @@ function setReportLang(lang) {
   buildReportForm(current);
 }
 
+function setReportPdfLink(available, url) {
+  const link = $("report-pdf-link");
+  if (!link) return;
+  if (available && url) {
+    link.href = url;
+    link.textContent = reportT("downloadPdf");
+    link.classList.remove("hidden");
+  } else {
+    link.classList.add("hidden");
+  }
+}
+
 async function loadMyReport() {
   const res = await fetch("/api/report");
   const data = await res.json();
   if (!data.ok) return;
   renderReportContext(data.context, "report-context");
   buildReportForm(data.data || {});
+  setReportPdfLink(data.pdf_available, data.pdf_url);
   const saved = $("report-saved");
   if (saved) saved.textContent = data.updated_at
     ? `${reportT("saved")} ${new Date(data.updated_at * 1000).toLocaleString()}`
@@ -951,7 +970,14 @@ async function saveReport() {
   const res = await postJSON("/api/report", { data: out });
   const saved = $("report-saved");
   if (res.data && res.data.ok) {
-    if (saved) saved.textContent = `${reportT("saved")} ${new Date().toLocaleString()}`;
+    if (saved) {
+      let msg = `${reportT("saved")} ${new Date().toLocaleString()}`;
+      if (res.data.pdf_generated) msg += ` · ${reportT("pdfReady")}`;
+      else if (res.data.pdf_error) msg += ` · ${reportT("pdfFailed")}`;
+      saved.textContent = msg;
+    }
+    setReportPdfLink(res.data.pdf_generated, res.data.pdf_url);
+    loadMyReport();
   } else if (saved) {
     saved.textContent = "Could not save.";
   }
@@ -1033,7 +1059,10 @@ async function loadUsers() {
   if (!data.ok) { box.innerHTML = `<p class="hint">${data.error || "Could not load users."}</p>`; return; }
   const rows = (data.users || []).map((u) => {
     const score = u.submitted_score != null ? (u.submitted_score * 100).toFixed(1) + "%" : "-";
-    const rep = u.has_report ? `<button class="btn-sm" onclick="openUserReport(${u.id}, '${escapeHtml(u.name)}')">view</button>` : `<span class="hint">none</span>`;
+    const rep = u.has_report
+      ? `<button class="btn-sm" onclick="openUserReport(${u.id}, '${escapeHtml(u.name)}')">view</button>`
+        + (u.has_pdf ? ` <a class="btn-sm" href="/api/admin/user/${u.id}/report/pdf" target="_blank" rel="noopener">PDF</a>` : "")
+      : `<span class="hint">none</span>`;
     return `<tr>
       <td class="name">${escapeHtml(u.name)}${u.is_admin ? ' <small>(admin)</small>' : ''}</td>
       <td>${u.total_runs || 0}</td>
@@ -1073,8 +1102,10 @@ async function openUserReport(id, name) {
     return `<div class="report-field"><label>${lbl}</label>
       <div class="report-answer">${val ? escapeHtml(val).replace(/\n/g, "<br>") : '<span class="hint">— empty —</span>'}</div></div>`;
   }).join("");
+  const pdfBtn = data.pdf_available && data.pdf_url
+    ? `<p><a class="btn-sm primary" href="${data.pdf_url}" target="_blank" rel="noopener">Download PDF report</a></p>` : "";
   wrap.innerHTML = `<h3>Report — ${escapeHtml(name)}</h3>
-    <div id="admin-user-report-context" class="report-context"></div>${updated}${fields}`;
+    <div id="admin-user-report-context" class="report-context"></div>${updated}${pdfBtn}${fields}`;
   wrap.classList.remove("hidden");
   renderReportContext(data.context, "admin-user-report-context");
   wrap.scrollIntoView({ behavior: "smooth" });

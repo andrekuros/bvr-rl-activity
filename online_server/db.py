@@ -119,6 +119,14 @@ def init_db() -> None:
                 conn.execute(f"ALTER TABLE runs ADD COLUMN {col} {decl}")
             except sqlite3.OperationalError:
                 pass  # column already exists
+        for col, decl in (
+            ("pdf_path", "TEXT"),
+            ("pdf_generated_at", "REAL"),
+        ):
+            try:
+                conn.execute(f"ALTER TABLE user_reports ADD COLUMN {col} {decl}")
+            except sqlite3.OperationalError:
+                pass
         conn.execute(
             "UPDATE runs SET run_uid = 'R' || printf('%06d', id) WHERE run_uid IS NULL OR run_uid = ''"
         )
@@ -346,7 +354,9 @@ def list_users() -> List[Dict]:
                COUNT(r.id) AS total_runs,
                SUM(CASE WHEN r.status='done' THEN 1 ELSE 0 END) AS done_runs,
                MAX(CASE WHEN r.submitted=1 THEN r.score END) AS submitted_score,
-               (SELECT COUNT(1) FROM user_reports ur WHERE ur.user_id=u.id) AS has_report
+               (SELECT COUNT(1) FROM user_reports ur WHERE ur.user_id=u.id) AS has_report,
+               (SELECT CASE WHEN ur.pdf_path IS NOT NULL AND ur.pdf_path != '' THEN 1 ELSE 0 END
+                FROM user_reports ur WHERE ur.user_id=u.id) AS has_pdf
         FROM users u
         LEFT JOIN runs r ON r.user_id = u.id
         GROUP BY u.id
@@ -360,22 +370,40 @@ def list_users() -> List[Dict]:
 def get_user_report(user_id: int) -> Optional[Dict]:
     conn = _connect()
     row = conn.execute(
-        "SELECT data_json, updated_at FROM user_reports WHERE user_id=?", (user_id,)
+        "SELECT data_json, updated_at, pdf_path, pdf_generated_at FROM user_reports WHERE user_id=?",
+        (user_id,),
     ).fetchone()
     conn.close()
     if row is None:
         return None
-    return {"data": row["data_json"], "updated_at": row["updated_at"]}
+    return {
+        "data": row["data_json"],
+        "updated_at": row["updated_at"],
+        "pdf_path": row["pdf_path"],
+        "pdf_generated_at": row["pdf_generated_at"],
+    }
 
 
-def save_user_report(user_id: int, data_json: str) -> None:
+def save_user_report(user_id: int, data_json: str,
+                     pdf_path: Optional[str] = None,
+                     pdf_generated_at: Optional[float] = None) -> None:
     conn = _connect()
     with conn:
-        conn.execute(
-            "INSERT INTO user_reports(user_id, data_json, updated_at) VALUES (?,?,?) "
-            "ON CONFLICT(user_id) DO UPDATE SET data_json=excluded.data_json, updated_at=excluded.updated_at",
-            (user_id, data_json, time.time()),
-        )
+        if pdf_path is not None:
+            conn.execute(
+                "INSERT INTO user_reports(user_id, data_json, updated_at, pdf_path, pdf_generated_at) "
+                "VALUES (?,?,?,?,?) "
+                "ON CONFLICT(user_id) DO UPDATE SET "
+                "data_json=excluded.data_json, updated_at=excluded.updated_at, "
+                "pdf_path=excluded.pdf_path, pdf_generated_at=excluded.pdf_generated_at",
+                (user_id, data_json, time.time(), pdf_path, pdf_generated_at or time.time()),
+            )
+        else:
+            conn.execute(
+                "INSERT INTO user_reports(user_id, data_json, updated_at) VALUES (?,?,?) "
+                "ON CONFLICT(user_id) DO UPDATE SET data_json=excluded.data_json, updated_at=excluded.updated_at",
+                (user_id, data_json, time.time()),
+            )
     conn.close()
 
 

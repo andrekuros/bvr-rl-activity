@@ -48,6 +48,7 @@ MODELS_DIR = os.path.join(db.DATA_DIR, "models")
 JOBS_DIR = os.path.join(db.DATA_DIR, "jobs")
 FINAL_DIR = os.path.join(db.DATA_DIR, "final")
 ANALYSIS_DIR = os.path.join(db.DATA_DIR, "analysis")
+REPORTS_PDF_DIR = os.path.join(db.DATA_DIR, "report_pdfs")
 
 
 def _allowed_enemies():
@@ -93,6 +94,81 @@ def _load_run_config(run_id: int, run: Dict):
         enemies = json.loads(run["enemies"]) if run.get("enemies") else list(training_enemy_pool())
         scenario = {"enemies": enemies, "random_enemy_prob": 0.0, "max_cycles": 260}
     return rewards, scenario
+
+
+def _pdf_filename(user_id: int, user_name: str) -> str:
+    safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in (user_name or "student"))
+    return f"TE276_{safe}_{user_id}.pdf"
+
+
+def _collect_pdf_assets(user_id: int) -> Dict:
+    """Gather submitted-run stats, plots and training config for the PDF."""
+    run = db.user_submitted_run(user_id)
+    out = {
+        "run": run,
+        "stats": None,
+        "plot_paths": {},
+        "curve": {},
+        "rewards": None,
+        "training_enemies": [],
+    }
+    if not run:
+        return out
+    try:
+        report = json.loads(run["analysis_json"]) if run.get("analysis_json") else None
+        if report:
+            out["stats"] = report.get("stats")
+            analysis_dir = os.path.join(ANALYSIS_DIR, f"run_{run['id']}")
+            for name, fn in (report.get("plots") or {}).items():
+                if name in ("heatmap", "trajectory_heatmap"):
+                    continue
+                path = os.path.join(analysis_dir, os.path.basename(fn))
+                if os.path.isfile(path):
+                    out["plot_paths"][name] = path
+    except Exception:
+        pass
+    try:
+        out["curve"] = json.loads(run["curve_json"]) if run.get("curve_json") else {}
+    except Exception:
+        out["curve"] = {}
+    rewards, scenario = _load_run_config(run["id"], run)
+    out["rewards"] = rewards
+    out["training_enemies"] = scenario.get("enemies") or (
+        json.loads(run["enemies"]) if run.get("enemies") else [])
+    return out
+
+
+def _generate_student_pdf(user_id: int, user_name: str, report_data: Dict) -> Optional[str]:
+    from online_server.report_pdf import generate_student_report_pdf
+
+    os.makedirs(REPORTS_PDF_DIR, exist_ok=True)
+    pdf_path = os.path.join(REPORTS_PDF_DIR, _pdf_filename(user_id, user_name))
+    assets = _collect_pdf_assets(user_id)
+    try:
+        generate_student_report_pdf(
+            pdf_path,
+            student_name=user_name,
+            report_data=report_data,
+            context=_report_context(user_id),
+            run=assets["run"],
+            stats=assets["stats"],
+            plot_paths=assets["plot_paths"],
+            curve=assets["curve"],
+            rewards=assets["rewards"],
+            training_enemies=assets["training_enemies"],
+        )
+        return pdf_path
+    except Exception as exc:
+        print(f"[report-pdf] user {user_id}: {exc}")
+        return None
+
+
+def _report_pdf_response(pdf_path: Optional[str], download_name: str):
+    if not pdf_path or not os.path.isfile(pdf_path):
+        return JSONResponse({"ok": False, "error": "PDF not found."}, status_code=404)
+    return FileResponse(pdf_path, media_type="application/pdf",
+                        filename=download_name)
+
 
 app = FastAPI(title="BVR Online Training Platform")
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
@@ -368,6 +444,7 @@ async def _startup():
     os.makedirs(JOBS_DIR, exist_ok=True)
     os.makedirs(FINAL_DIR, exist_ok=True)
     os.makedirs(ANALYSIS_DIR, exist_ok=True)
+    os.makedirs(REPORTS_PDF_DIR, exist_ok=True)
     # Bootstrap an admin account on first launch.
     if db.user_count() == 0:
         name = os.environ.get("ADMIN_NAME", "admin")
@@ -590,10 +667,13 @@ async def get_my_report(sid: Optional[str] = Cookie(None)):
     if user is None:
         return JSONResponse({"error": "auth"}, status_code=401)
     rep = db.get_user_report(user["id"])
+    pdf_path = rep.get("pdf_path") if rep else None
     return {
         "ok": True,
         "data": json.loads(rep["data"]) if rep else {},
         "updated_at": rep["updated_at"] if rep else None,
+        "pdf_available": bool(pdf_path and os.path.isfile(pdf_path)),
+        "pdf_url": "/api/report/pdf" if pdf_path and os.path.isfile(pdf_path) else None,
         "context": _report_context(user["id"]),
     }
 
@@ -608,8 +688,27 @@ async def save_my_report(payload: Dict, sid: Optional[str] = Cookie(None)):
         return JSONResponse({"ok": False, "error": "Invalid report data."}, status_code=400)
     # Keep it bounded so a single field can't bloat the DB.
     clean = {str(k): str(v)[:8000] for k, v in data.items()}
-    db.save_user_report(user["id"], json.dumps(clean))
-    return {"ok": True}
+    pdf_path = _generate_student_pdf(user["id"], user["name"], clean)
+    if pdf_path:
+        db.save_user_report(user["id"], json.dumps(clean), pdf_path=pdf_path)
+    else:
+        db.save_user_report(user["id"], json.dumps(clean))
+    return {
+        "ok": True,
+        "pdf_generated": bool(pdf_path),
+        "pdf_url": "/api/report/pdf" if pdf_path else None,
+        "pdf_error": None if pdf_path else "Could not generate PDF.",
+    }
+
+
+@app.get("/api/report/pdf")
+async def download_my_report_pdf(sid: Optional[str] = Cookie(None)):
+    user = current_user(sid)
+    if user is None:
+        return JSONResponse({"error": "auth"}, status_code=401)
+    rep = db.get_user_report(user["id"])
+    name = _pdf_filename(user["id"], user["name"])
+    return _report_pdf_response(rep.get("pdf_path") if rep else None, name)
 
 
 @app.get("/api/run/{run_id}/report")
@@ -849,14 +948,29 @@ async def admin_user_report(user_id: int, sid: Optional[str] = Cookie(None)):
     if user is None:
         return JSONResponse({"ok": False, "error": "User not found."}, status_code=404)
     rep = db.get_user_report(user_id)
+    pdf_path = rep.get("pdf_path") if rep else None
     return {
         "ok": True,
         "user": {"id": user["id"], "name": user["name"]},
         "data": json.loads(rep["data"]) if rep else {},
         "updated_at": rep["updated_at"] if rep else None,
+        "pdf_available": bool(pdf_path and os.path.isfile(pdf_path)),
+        "pdf_url": f"/api/admin/user/{user_id}/report/pdf" if pdf_path and os.path.isfile(pdf_path) else None,
         "context": _report_context(user_id),
         "runs": db.list_user_runs(user_id),
     }
+
+
+@app.get("/api/admin/user/{user_id}/report/pdf")
+async def admin_user_report_pdf(user_id: int, sid: Optional[str] = Cookie(None)):
+    if _require_admin(sid) is None:
+        return JSONResponse({"error": "admin only"}, status_code=403)
+    user = db.get_user(user_id)
+    if user is None:
+        return JSONResponse({"ok": False, "error": "User not found."}, status_code=404)
+    rep = db.get_user_report(user_id)
+    name = _pdf_filename(user_id, user["name"])
+    return _report_pdf_response(rep.get("pdf_path") if rep else None, name)
 
 
 @app.get("/api/admin/reports/export")

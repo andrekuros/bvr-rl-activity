@@ -156,7 +156,9 @@ td.score { color: var(--green); font-weight: 700; }
 .analysis-out img { max-width: 360px; border: 1px solid var(--line); border-radius: 8px; margin: 8px 8px 0 0; }
 .analysis-table { font-size: 12px; border-collapse: collapse; margin-top: 8px; width: 100%; max-width: 640px; }
 .analysis-table td, .analysis-table th { border: 1px solid var(--line); padding: 4px 8px; text-align: center; }
-.btn-sm { font-size: 12px; padding: 4px 10px; }
+.btn-sm { font-size: 12px; padding: 4px 10px; text-decoration: none; display: inline-block; }
+a.btn-sm { color: var(--ink); border: 1px solid var(--line); border-radius: 6px; background: #131a29; }
+a.btn-sm.primary { background: var(--blue); color: #fff; border-color: var(--blue); }
 .run-report { margin: 8px 0 4px; }
 .run-report h3 { font-size: 13px; margin: 14px 0 4px; color: var(--ink); }
 .report-params { background: #0d1322; border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; }

@@ -14,6 +14,8 @@ import sqlite3
 import time
 from typing import Dict, List, Optional
 
+from bvr.training_config import PLATFORM_DEFAULTS
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(HERE, "data")
 DB_PATH = os.path.join(DATA_DIR, "platform.db")
@@ -34,6 +36,7 @@ DEFAULT_CONFIG = {
     "live_eval_max_enemies": "4",
     "locked_eval_episodes_per_enemy": "30",
     "analysis_episodes_per_enemy": "10",
+    **PLATFORM_DEFAULTS,
 }
 
 

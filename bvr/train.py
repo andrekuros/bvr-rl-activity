@@ -239,7 +239,7 @@ class LiveCallback(BaseCallback):
 
     def _emit_update(self, ep_rew_mean: float, ep_len_mean: float, episodes: List[Dict],
                      eval_score: float, eval_ran: bool, eval_summary: Optional[Dict] = None) -> None:
-        self.on_event({
+        payload = {
             "type": "update",
             "timesteps": int(self.num_timesteps),
             "progress": min(self.num_timesteps / max(self.total_timesteps, 1), 1.0),
@@ -250,7 +250,10 @@ class LiveCallback(BaseCallback):
             "episodes": episodes,
             "eval_ran": eval_ran,
             "eval_summary": eval_summary,
-        })
+        }
+        if eval_ran:
+            payload["eval_epoch"] = self._eval_cycle
+        self.on_event(payload)
 
     def _on_rollout_end(self) -> None:
         buf = self.model.ep_info_buffer
@@ -296,6 +299,7 @@ class LiveCallback(BaseCallback):
             "enemy_total": len(eval_batch),
             "running_enemy": eval_batch[0] if eval_batch else "",
             "episodes_per_enemy": eps_per,
+            "eval_epoch": self._eval_cycle,
             "state": "starting",
         })
         episodes = run_eval_episodes(
@@ -346,8 +350,10 @@ def run_training(reward_config: Optional[Dict] = None, scenario: Optional[Dict] 
     total_timesteps = int(total_timesteps or scenario.get("train_timesteps", 200000))
     eval_enemies = scenario.get("enemies", SELECTABLE_TYPES) or SELECTABLE_TYPES
 
-    env = DummyVecEnv([make_env_fn(reward_config, scenario, seed)])
-    model = make_model(env, seed=seed, verbose=0)
+    train_seed = int(scenario.get("seed", seed))
+    env = DummyVecEnv([make_env_fn(reward_config, scenario, train_seed)])
+    model = make_model(env, seed=train_seed, verbose=0,
+                       training=scenario.get("training"))
 
     on_event({"type": "status", "state": "training", "total_timesteps": total_timesteps})
     cb = LiveCallback(on_event, stop_flag, reward_config, scenario, total_timesteps, eval_enemies)

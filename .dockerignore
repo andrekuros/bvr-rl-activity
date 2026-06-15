@@ -1,0 +1,10 @@
+.venv/
+venv/
+__pycache__/
+*.pyc
+.git/
+models/
+analysis_output/
+online_server/data/
+competition_server/leaderboard.json
+competition_server/submissions/

@@ -120,6 +120,16 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 .eval-bar { height: 6px; margin-bottom: 4px; }
 #eval-progress-bar { height: 100%; width: 0%; background: var(--green); transition: width 0.15s; }
 .eval-overall { font-size: 1.35rem; font-weight: 600; color: var(--green); margin: 10px 0 0; }
+.epoch-tabs { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0 10px; }
+.epoch-tabs.hidden { display: none !important; }
+.epoch-tab {
+  padding: 5px 12px; font-size: 12px; border-radius: 16px;
+  background: #0d1322; border: 1px solid var(--line); color: var(--muted); cursor: pointer;
+}
+.epoch-tab:hover { border-color: var(--blue); color: var(--ink); }
+.epoch-tab.active { background: #1d3a5f; border-color: var(--blue); color: var(--ink); font-weight: 600; }
+.epoch-tab.live { border-style: dashed; }
+.epoch-tab.live.active { border-style: solid; }
 
 .match-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 12px; }
 .match { background: #0d1322; border: 1px solid var(--line); border-radius: 8px; padding: 6px; }

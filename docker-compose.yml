@@ -1,0 +1,40 @@
+services:
+  bvrlab:
+    build: .
+    image: bvrlab:latest
+    container_name: bvrlab
+    command: ["uvicorn", "server.app:app", "--host", "0.0.0.0", "--port", "8000"]
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - ./config:/app/config
+      - ./models:/app/models
+      - ./analysis_output:/app/analysis_output
+    restart: unless-stopped
+
+  bvrlab-competition:
+    build: .
+    image: bvrlab:latest
+    container_name: bvrlab-competition
+    command: ["uvicorn", "competition_server.main:app", "--host", "0.0.0.0", "--port", "8001"]
+    ports:
+      - "127.0.0.1:8001:8001"
+    volumes:
+      - ./competition_server/submissions:/app/competition_server/submissions
+      - ./competition_server/leaderboard.json:/app/competition_server/leaderboard.json
+    restart: unless-stopped
+
+  bvrlab-online:
+    build: .
+    image: bvrlab:latest
+    container_name: bvrlab-online
+    command: ["python", "online_server/main.py"]
+    ports:
+      - "127.0.0.1:8002:8002"
+    environment:
+      ADMIN_NAME: admin
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-admin}
+    volumes:
+      - ./online_server/data:/app/online_server/data
+      - ./config:/app/config
+    restart: unless-stopped

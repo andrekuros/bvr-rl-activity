@@ -4,6 +4,9 @@ const $ = (id) => document.getElementById(id);
 let CONFIG = null;
 const history = { t: [], reward: [], winrate: [] };
 let evalLiveEpisodes = [];
+let evalEpochs = [];
+let selectedEpochIdx = -1;
+let liveEpochId = null;
 let matchEpisodes = [];
 let matchIdx = 0;
 let matchHold = 0;
@@ -94,6 +97,7 @@ function flash(btn, text) {
 async function startTraining() {
   await saveConfig();
   history.t.length = 0; history.reward.length = 0; history.winrate.length = 0;
+  resetEvalEpochs();
   await fetch("/api/train/start", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -161,16 +165,110 @@ function fmtScore(v) {
   return v == null ? "-" : (v * 100).toFixed(0) + "%";
 }
 
+function resetEvalEpochs() {
+  evalEpochs = [];
+  selectedEpochIdx = -1;
+  liveEpochId = null;
+  evalLiveEpisodes = [];
+  matchEpisodes = [];
+  matchIdx = 0;
+  matchHold = 0;
+  renderEpochTabs();
+  if ($("match-grid")) $("match-grid").innerHTML = "";
+  if ($("eval-overall")) $("eval-overall").textContent = "";
+}
+
+function renderEpochTabs() {
+  const bar = $("epoch-tabs");
+  if (!bar) return;
+  if (!evalEpochs.length && liveEpochId == null) {
+    bar.classList.add("hidden");
+    bar.innerHTML = "";
+    return;
+  }
+  bar.classList.remove("hidden");
+  bar.innerHTML = "";
+  evalEpochs.forEach((ep, i) => {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "epoch-tab" + (i === selectedEpochIdx ? " active" : "");
+    btn.textContent = `Epoch ${ep.id}`;
+    btn.title = `${ep.timesteps.toLocaleString()} steps · score ${fmtScore(ep.score)}`;
+    btn.onclick = () => selectEpoch(i);
+    bar.appendChild(btn);
+  });
+  if (liveEpochId != null) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "epoch-tab live" + (selectedEpochIdx === -1 ? " active" : "");
+    btn.textContent = `Epoch ${liveEpochId} · live`;
+    btn.onclick = () => selectEpoch(-1);
+    bar.appendChild(btn);
+  }
+}
+
+function selectEpoch(idx) {
+  selectedEpochIdx = idx;
+  if (idx === -1) {
+    matchEpisodes = evalLiveEpisodes.filter(Boolean).map((e) => ({ ...e }));
+  } else {
+    matchEpisodes = evalEpochs[idx].episodes.map((e) => ({ ...e }));
+  }
+  matchIdx = 0;
+  matchHold = 0;
+  buildMatchGrid(matchEpisodes);
+  renderEpochTabs();
+  updateEvalOverallForSelection();
+}
+
+function updateEvalOverallForSelection() {
+  const el = $("eval-overall");
+  if (!el) return;
+  if (selectedEpochIdx === -1) {
+    const avg = avgEvalScore(evalLiveEpisodes);
+    const done = evalLiveEpisodes.filter(Boolean).length;
+    if (avg != null) {
+      el.textContent = `Average score: ${fmtScore(avg)} (${done} runs · live)`;
+    }
+    return;
+  }
+  const ep = evalEpochs[selectedEpochIdx];
+  if (!ep) return;
+  el.textContent =
+    `Epoch ${ep.id} · ${ep.timesteps.toLocaleString()} steps · score ${fmtScore(ep.score)} (${ep.episodes.length} runs)`;
+}
+
+function finalizeLiveEpoch(timesteps, score) {
+  const episodes = evalLiveEpisodes.filter(Boolean).map((e) => ({ ...e }));
+  if (!episodes.length) return;
+  evalEpochs.push({
+    id: liveEpochId || evalEpochs.length + 1,
+    timesteps,
+    score,
+    episodes,
+  });
+  liveEpochId = null;
+  selectedEpochIdx = evalEpochs.length - 1;
+  matchEpisodes = episodes;
+  matchIdx = 0;
+  matchHold = 0;
+  buildMatchGrid(matchEpisodes);
+  renderEpochTabs();
+  updateEvalOverallForSelection();
+}
+
 function showEvalProgress(ev) {
   const box = $("eval-progress");
   if (!box) return;
   box.classList.remove("hidden");
   if (ev.state === "starting") {
     evalLiveEpisodes = [];
-    matchEpisodes = [];
+    liveEpochId = ev.eval_epoch || evalEpochs.length + 1;
+    selectedEpochIdx = -1;
     matchIdx = 0;
     if ($("match-grid")) $("match-grid").innerHTML = "";
     if ($("eval-overall")) $("eval-overall").textContent = "Running eval pass…";
+    renderEpochTabs();
   }
   const finished = ev.finished ?? 0;
   const total = ev.total ?? 0;
@@ -189,15 +287,17 @@ function showEvalProgress(ev) {
   if (ev.enemy_done && ev.enemy_summary) {
     const idx = (ev.enemy_index || 1) - 1;
     evalLiveEpisodes[idx] = ev.enemy_summary;
-    matchEpisodes[idx] = ev.enemy_summary;
-    renderEvalCard(ev.enemy_summary, idx);
+    if (selectedEpochIdx === -1) {
+      matchEpisodes[idx] = ev.enemy_summary;
+      renderEvalCard(ev.enemy_summary, idx);
+    }
     const avg = avgEvalScore(evalLiveEpisodes);
     const done = evalLiveEpisodes.filter(Boolean).length;
     if (avg != null) {
       $("m-winrate").textContent = fmtScore(avg);
-      if ($("eval-overall")) {
+      if (selectedEpochIdx === -1 && $("eval-overall")) {
         $("eval-overall").textContent =
-          `Average score: ${fmtScore(avg)} (${done}/${ev.enemy_total || ev.total} runs complete)`;
+          `Average score: ${fmtScore(avg)} (${done}/${ev.enemy_total || ev.total} runs complete · live)`;
       }
     }
   }
@@ -270,15 +370,14 @@ function handleEvent(ev) {
     $("m-reward").textContent = ev.ep_rew_mean;
     $("m-timesteps").textContent = ev.timesteps;
     if (ev.eval_ran === false) hideEvalProgress();
-    else applyEvalSummary(ev);
+    else {
+      const score = ev.eval_score != null ? ev.eval_score : ev.winrate;
+      finalizeLiveEpoch(ev.timesteps, score);
+      applyEvalSummary(ev);
+    }
     history.t.push(ev.timesteps);
     history.reward.push(ev.ep_rew_mean);
     history.winrate.push(ev.eval_score != null ? ev.eval_score : ev.winrate);
-    if (ev.episodes && ev.episodes.length) {
-      matchEpisodes = ev.episodes;
-      matchIdx = 0;
-      buildMatchGrid(matchEpisodes);
-    }
     drawCurve();
   } else if (ev.type === "replay_start") {
     $("replay-info").textContent = "vs " + ev.enemy;

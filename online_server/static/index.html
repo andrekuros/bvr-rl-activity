@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>BVR RL - Online Training</title>
-  <link rel="stylesheet" href="/static/style.css?v=10" />
+  <link rel="stylesheet" href="/static/style.css?v=11" />
 </head>
 <body>
   <!-- AUTH VIEW -->
@@ -107,6 +107,7 @@
           </div>
           <div class="panel">
             <h2>Live eval <small>avg score · 0.6×mission + 0.25×kill + 0.15×missile eff. · monitoring only</small></h2>
+            <div id="epoch-tabs" class="epoch-tabs hidden"></div>
             <p id="eval-overall" class="eval-overall"></p>
             <div id="match-grid" class="match-grid"></div>
           </div>
@@ -201,6 +202,35 @@
         <p class="hint">Live eval during training: every N PPO rollouts, test up to M enemies (rotating). Locked score after training uses locked_eval episodes per opponent. Post-run analysis uses analysis_episodes (default 10 for speed).</p>
       </div>
       <div class="panel">
+        <h2>Model &amp; PPO training <small>admin only — applies to all new student runs</small></h2>
+        <p class="hint" id="training-config-hint">Defaults match the locked classroom contract (128×2 MLP, PPO on CPU). Students cannot change these.</p>
+        <p class="rw-section">Environment</p>
+        <div class="field"><label>train_seed</label><input type="number" min="0" id="cfg-train_seed" /></div>
+        <div class="field"><label>max_cycles (steps/episode)</label><input type="number" min="50" id="cfg-max_cycles" /></div>
+        <div class="field"><label>train_device</label>
+          <select id="cfg-train_device">
+            <option value="cpu">cpu</option>
+            <option value="cuda">cuda (GPU)</option>
+            <option value="auto">auto</option>
+          </select>
+        </div>
+        <p class="rw-section">Neural network (MLP)</p>
+        <div class="field"><label>policy_hidden_size</label><input type="number" min="32" max="512" step="32" id="cfg-policy_hidden_size" /></div>
+        <div class="field"><label>policy_n_layers</label><input type="number" min="1" max="4" id="cfg-policy_n_layers" /></div>
+        <p class="rw-section">PPO hyperparameters</p>
+        <div class="field"><label>ppo_learning_rate</label><input type="number" step="0.00001" min="0.00001" id="cfg-ppo_learning_rate" /></div>
+        <div class="field"><label>ppo_n_steps</label><input type="number" min="256" step="256" id="cfg-ppo_n_steps" /></div>
+        <div class="field"><label>ppo_batch_size</label><input type="number" min="32" step="32" id="cfg-ppo_batch_size" /></div>
+        <div class="field"><label>ppo_n_epochs</label><input type="number" min="1" max="50" id="cfg-ppo_n_epochs" /></div>
+        <div class="field"><label>ppo_gamma</label><input type="number" step="0.01" min="0.9" max="0.999" id="cfg-ppo_gamma" /></div>
+        <div class="field"><label>ppo_gae_lambda</label><input type="number" step="0.01" min="0.8" max="1" id="cfg-ppo_gae_lambda" /></div>
+        <div class="field"><label>ppo_clip_range</label><input type="number" step="0.01" min="0.05" max="0.5" id="cfg-ppo_clip_range" /></div>
+        <div class="field"><label>ppo_ent_coef</label><input type="number" step="0.001" min="0" max="0.1" id="cfg-ppo_ent_coef" /></div>
+        <div class="field"><label>ppo_vf_coef</label><input type="number" step="0.05" min="0.1" max="1" id="cfg-ppo_vf_coef" /></div>
+        <div class="field"><label>ppo_max_grad_norm</label><input type="number" step="0.1" min="0.1" max="5" id="cfg-ppo_max_grad_norm" /></div>
+        <div class="buttons"><button id="admin-save-training" class="primary">Save model settings</button></div>
+      </div>
+      <div class="panel">
         <h2>Reward weights (student form)</h2>
         <label class="check"><input type="checkbox" id="cfg-rewards_start_zero" /> Start students at zero (all weights 0)</label>
         <p class="hint">When checked, every student opens the Train tab with all weights at 0 and must choose values using the tooltips. When unchecked, they start from the defaults in the table below.</p>
@@ -234,6 +264,6 @@
   <script src="/static/charts.js?v=1"></script>
   <script src="/static/reward-editor.js?v=4"></script>
   <script src="/static/enemy-picker.js?v=2"></script>
-  <script src="/static/app.js?v=22"></script>
+  <script src="/static/app.js?v=24"></script>
 </body>
 </html>

@@ -37,6 +37,8 @@ from fastapi.staticfiles import StaticFiles  # noqa: E402
 from bvr import rewards as rewards_mod  # noqa: E402
 from bvr.enemies import (SELECTABLE_TYPES, enemy_catalog, eval_enemy_pool,  # noqa: E402
                          reference_types, training_enemy_pool)
+from bvr.training_config import (PLATFORM_DEFAULTS, sanitize_platform_updates,  # noqa: E402
+                               training_block_from_platform, training_defaults_payload)
 from online_server import db  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -219,13 +221,17 @@ class JobManager:
             rewards_mod.save_rewards(os.path.join(job_dir, "rewards.json"), rewards)
             enemies = json.loads(run["enemies"]) or list(training_enemy_pool())
             enemy_weights = json.loads(run["enemy_weights_json"]) if run.get("enemy_weights_json") else {}
+            platform_cfg = db.get_config()
             scenario = {"enemies": enemies, "random_enemy_prob": 0.0,
                         "enemy_sampling": "weighted" if enemy_weights else "round_robin",
                         "enemy_weights": enemy_weights,
-                        "max_cycles": 260, "train_timesteps": run["steps"], "seed": 0,
-                        "eval_episodes_per_enemy": int(db.get_config().get("eval_episodes_per_enemy", 1)),
-                        "eval_every_rollouts": int(db.get_config().get("eval_every_rollouts", 8)),
-                        "live_eval_max_enemies": int(db.get_config().get("live_eval_max_enemies", 4))}
+                        "max_cycles": int(platform_cfg.get("max_cycles", 260)),
+                        "train_timesteps": run["steps"],
+                        "seed": int(platform_cfg.get("train_seed", 0)),
+                        "eval_episodes_per_enemy": int(platform_cfg.get("eval_episodes_per_enemy", 1)),
+                        "eval_every_rollouts": int(platform_cfg.get("eval_every_rollouts", 8)),
+                        "live_eval_max_enemies": int(platform_cfg.get("live_eval_max_enemies", 4)),
+                        "training": training_block_from_platform(platform_cfg)}
             with open(os.path.join(job_dir, "scenario.json"), "w", encoding="utf-8") as f:
                 json.dump(scenario, f)
 
@@ -735,7 +741,8 @@ async def admin_get(sid: Optional[str] = Cookie(None)):
     return {"config": db.get_config(), "runs": db.all_runs(100),
             "reward_editor": rewards_mod.reward_editor_payload(db.get_config()),
             "code_defaults": rewards_mod.DEFAULT_REWARDS,
-            "code_ranges": rewards_mod.DEFAULT_RANGES}
+            "code_ranges": rewards_mod.DEFAULT_RANGES,
+            "training_defaults": training_defaults_payload()}
 
 
 @app.post("/api/admin/config")
@@ -747,8 +754,13 @@ async def admin_set(payload: Dict, sid: Optional[str] = Cookie(None)):
                "rewards_start_zero", "reward_defaults_json", "reward_ranges_json",
                "eval_every_rollouts", "eval_episodes_per_enemy", "live_eval_max_enemies",
                "locked_eval_episodes_per_enemy", "analysis_episodes_per_enemy",
-               "steps_editable"}
-    db.set_config({k: v for k, v in payload.items() if k in allowed})
+               "steps_editable", *PLATFORM_DEFAULTS.keys()}
+    updates = {k: v for k, v in payload.items() if k in allowed}
+    training_updates = sanitize_platform_updates(
+        {k: v for k, v in updates.items() if k in PLATFORM_DEFAULTS})
+    for k, v in training_updates.items():
+        updates[k] = v
+    db.set_config(updates)
     return {"ok": True, "config": db.get_config()}
 
 

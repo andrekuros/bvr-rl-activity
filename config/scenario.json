@@ -1,6 +1,14 @@
 {
   "enemies": [
-    "B1"
+    "B1",
+    "B8",
+    "B9",
+    "super_defensive",
+    "duck",
+    "balanced",
+    "super_aggressive",
+    "B7",
+    "B10"
   ],
   "random_enemy_prob": 0.0,
   "max_cycles": 260,

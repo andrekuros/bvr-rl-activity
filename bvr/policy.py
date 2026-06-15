@@ -11,9 +11,11 @@ in `train.py` will make your submission ineligible.
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Dict, Optional
 
 from stable_baselines3 import PPO
+
+from .training_config import resolve_training
 
 # Fixed actor/critic architecture (two hidden layers of 128 units, tanh).
 POLICY_KWARGS = dict(net_arch=dict(pi=[128, 128], vf=[128, 128]))
@@ -34,15 +36,16 @@ PPO_HYPERPARAMS = dict(
 
 
 def make_model(env, seed: Optional[int] = 0, tensorboard_log: Optional[str] = None,
-               verbose: int = 0) -> PPO:
-    """Build the locked PPO model around a given (vectorized) environment."""
+               verbose: int = 0, training: Optional[Dict] = None) -> PPO:
+    """Build the PPO model. Uses locked defaults unless `training` overrides (admin)."""
+    hp, pk, device = resolve_training(training)
     return PPO(
         "MlpPolicy",
         env,
-        policy_kwargs=POLICY_KWARGS,
+        policy_kwargs=pk,
         seed=seed,
         tensorboard_log=tensorboard_log,
         verbose=verbose,
-        device="cpu",
-        **PPO_HYPERPARAMS,
+        device=device,
+        **hp,
     )

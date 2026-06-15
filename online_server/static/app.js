@@ -5,7 +5,11 @@ let watchedRun = null;
 const history = { t: [], reward: [], mission: [], score: [] };
 const SCORE_FORMULA = "0.6×mission + 0.25×kill + 0.15×missile eff.";
 let evalLiveEpisodes = [];
+let evalEpochs = [];
+let selectedEpochIdx = -1;
+let liveEpochId = null;
 let matchEpisodes = [];
+let matchIdx = 0;
 let matchHold = 0;
 const MATCH_HOLD_FRAMES = 55;
 let replayHold = 0;
@@ -202,6 +206,7 @@ async function queueRun() {
   if (!res.data.ok) { alert(res.data.error || "Could not start"); return; }
   watchedRun = res.data.run_id;
   history.t.length = 0; history.reward.length = 0; history.mission.length = 0; history.score.length = 0;
+  resetEvalEpochs();
   $("post-run-panel")?.classList.add("hidden");
   $("live-run").textContent = `#${res.data.run_id} (queued)`;
   $("m-state").textContent = "queued";
@@ -225,6 +230,99 @@ function avgEvalScore(eps) {
 function fmtScore(v) {
   return v == null ? "-" : (v * 100).toFixed(0) + "%";
 }
+
+function resetEvalEpochs() {
+  evalEpochs = [];
+  selectedEpochIdx = -1;
+  liveEpochId = null;
+  evalLiveEpisodes = [];
+  matchEpisodes = [];
+  matchIdx = 0;
+  matchHold = 0;
+  renderEpochTabs();
+  if ($("match-grid")) $("match-grid").innerHTML = "";
+  if ($("eval-overall")) $("eval-overall").textContent = "";
+}
+
+function renderEpochTabs() {
+  const bar = $("epoch-tabs");
+  if (!bar) return;
+  if (!evalEpochs.length && liveEpochId == null) {
+    bar.classList.add("hidden");
+    bar.innerHTML = "";
+    return;
+  }
+  bar.classList.remove("hidden");
+  bar.innerHTML = "";
+  evalEpochs.forEach((ep, i) => {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "epoch-tab" + (i === selectedEpochIdx ? " active" : "");
+    btn.textContent = `Epoch ${ep.id}`;
+    btn.title = `${ep.timesteps.toLocaleString()} steps · score ${fmtScore(ep.score)}`;
+    btn.onclick = () => selectEpoch(i);
+    bar.appendChild(btn);
+  });
+  if (liveEpochId != null) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "epoch-tab live" + (selectedEpochIdx === -1 ? " active" : "");
+    btn.textContent = `Epoch ${liveEpochId} · live`;
+    btn.onclick = () => selectEpoch(-1);
+    bar.appendChild(btn);
+  }
+}
+
+function selectEpoch(idx) {
+  selectedEpochIdx = idx;
+  if (idx === -1) {
+    matchEpisodes = evalLiveEpisodes.filter(Boolean).map((e) => ({ ...e }));
+  } else {
+    matchEpisodes = evalEpochs[idx].episodes.map((e) => ({ ...e }));
+  }
+  matchIdx = 0;
+  matchHold = 0;
+  buildMatchGrid(matchEpisodes);
+  renderEpochTabs();
+  updateEvalOverallForSelection();
+}
+
+function updateEvalOverallForSelection() {
+  const el = $("eval-overall");
+  if (!el) return;
+  if (selectedEpochIdx === -1) {
+    const avg = avgEvalScore(evalLiveEpisodes);
+    const done = evalLiveEpisodes.filter(Boolean).length;
+    if (avg != null) {
+      el.textContent = `Average score: ${fmtScore(avg)} (${done} runs · live)`;
+    }
+    return;
+  }
+  const ep = evalEpochs[selectedEpochIdx];
+  if (!ep) return;
+  el.textContent =
+    `Epoch ${ep.id} · ${ep.timesteps.toLocaleString()} steps · score ${fmtScore(ep.score)} (${ep.episodes.length} runs)`;
+}
+
+function finalizeLiveEpoch(timesteps, score) {
+  const episodes = evalLiveEpisodes.filter(Boolean).map((e) => ({ ...e }));
+  if (!episodes.length) return;
+  evalEpochs.push({
+    id: liveEpochId || evalEpochs.length + 1,
+    timesteps,
+    score,
+    episodes,
+  });
+  liveEpochId = null;
+  selectedEpochIdx = evalEpochs.length - 1;
+  matchEpisodes = episodes;
+  matchIdx = 0;
+  matchHold = 0;
+  buildMatchGrid(matchEpisodes);
+  renderEpochTabs();
+  updateEvalOverallForSelection();
+}
+
 function runLabel(r) {
   return r.run_uid || `R${String(r.id).padStart(6, "0")}`;
 }
@@ -251,10 +349,12 @@ function showEvalProgress(ev) {
   box.classList.remove("hidden");
   if (ev.state === "starting") {
     evalLiveEpisodes = [];
-    matchEpisodes = [];
+    liveEpochId = ev.eval_epoch || evalEpochs.length + 1;
+    selectedEpochIdx = -1;
     matchIdx = 0;
     if ($("match-grid")) $("match-grid").innerHTML = "";
     if ($("eval-overall")) $("eval-overall").textContent = "Running eval pass…";
+    renderEpochTabs();
   }
   const finished = ev.finished ?? 0;
   const total = ev.total ?? 0;
@@ -273,15 +373,17 @@ function showEvalProgress(ev) {
   if (ev.enemy_done && ev.enemy_summary) {
     const idx = (ev.enemy_index || 1) - 1;
     evalLiveEpisodes[idx] = ev.enemy_summary;
-    matchEpisodes[idx] = ev.enemy_summary;
-    renderEvalCard(ev.enemy_summary, idx);
+    if (selectedEpochIdx === -1) {
+      matchEpisodes[idx] = ev.enemy_summary;
+      renderEvalCard(ev.enemy_summary, idx);
+    }
     const avg = avgEvalScore(evalLiveEpisodes);
     const done = evalLiveEpisodes.filter(Boolean).length;
     if (avg != null) {
       $("m-mission").textContent = fmtScore(avg);
-      if ($("eval-overall")) {
+      if (selectedEpochIdx === -1 && $("eval-overall")) {
         $("eval-overall").textContent =
-          `Average score: ${fmtScore(avg)} (${done}/${ev.enemy_total || ev.total} runs complete)`;
+          `Average score: ${fmtScore(avg)} (${done}/${ev.enemy_total || ev.total} runs complete · live)`;
       }
     }
   }
@@ -382,17 +484,12 @@ function handleEvent(ev) {
     $("m-mission").textContent = fmtScore(score);
     $("m-reward").textContent = ev.ep_rew_mean;
     if (ev.eval_ran === false) hideEvalProgress();
-    else applyEvalSummary(ev);
-    appendHistoryPoint(ev.timesteps, ev.ep_rew_mean, score);
-    // Frames are streamed per-enemy via eval_progress (enemy_done); the bulk
-    // update event is frameless. Only rebuild the grid from it if it actually
-    // carries frames, otherwise keep the animating per-enemy cards.
-    if (ev.episodes && ev.episodes.some((e) => e && e.frames && e.frames.length)) {
-      matchEpisodes = ev.episodes;
-      matchIdx = 0;
-      matchHold = 0;
-      buildMatchGrid(matchEpisodes);
+    else {
+      const score = ev.eval_score != null ? ev.eval_score : ev.winrate;
+      finalizeLiveEpoch(ev.timesteps, score);
+      applyEvalSummary(ev);
     }
+    appendHistoryPoint(ev.timesteps, ev.ep_rew_mean, score);
   } else if (ev.type === "done") {
     $("m-state").textContent = "done";
     showPostRunPanel(ev.run_id);
@@ -771,7 +868,13 @@ async function loadBoard() {
     <th>survive</th><th>reward</th></tr>${rows || "<tr><td colspan='7'>No submissions yet.</td></tr>"}</table>`;
 }
 
-// ---------------------------------------------------------------- admin
+const TRAINING_CFG_KEYS = [
+  "train_seed", "max_cycles", "train_device",
+  "policy_hidden_size", "policy_n_layers",
+  "ppo_learning_rate", "ppo_n_steps", "ppo_batch_size", "ppo_n_epochs",
+  "ppo_gamma", "ppo_gae_lambda", "ppo_clip_range", "ppo_ent_coef", "ppo_vf_coef", "ppo_max_grad_norm",
+];
+
 async function loadAdmin() {
   const data = await (await fetch("/api/admin/config")).json();
   if (!data.config) return;
@@ -790,13 +893,22 @@ async function loadAdmin() {
      <td>${r.submitted ? "yes" : ""}</td>
      <td><button class="danger btn-sm" onclick="deleteRun(${r.id}, '${runLabel(r)}')">delete</button></td></tr>`).join("");
   $("admin-runs").innerHTML = `<table><tr><th>id</th><th>user</th><th>status</th><th>steps</th><th>score</th><th>submitted</th><th></th></tr>${rows}</table>`;
+  if (data.training_defaults?.defaults) {
+    const hint = $("training-config-hint");
+    if (hint) {
+      const d = data.training_defaults.defaults;
+      hint.textContent =
+        `Locked baseline: ${d.policy_hidden_size}×${d.policy_n_layers} MLP, lr=${d.ppo_learning_rate}, n_steps=${d.ppo_n_steps}, device=${d.train_device}. Values are clamped on save.`;
+    }
+  }
 }
-async function saveAdmin() {
+async function saveAdmin(includeTraining = false) {
   const keys = ["class_access_code", "runs_per_window", "steps_per_run", "window_hours", "max_concurrent", "registration_open",
     "eval_every_rollouts", "eval_episodes_per_enemy", "live_eval_max_enemies",
     "locked_eval_episodes_per_enemy", "analysis_episodes_per_enemy"];
   const body = {};
   keys.forEach((k) => (body[k] = $("cfg-" + k).value));
+  if (includeTraining) TRAINING_CFG_KEYS.forEach((k) => (body[k] = $("cfg-" + k).value));
   body.rewards_start_zero = $("cfg-rewards_start_zero")?.checked ? "1" : "0";
   body.steps_editable = $("cfg-steps_editable")?.checked ? "1" : "0";
   if (adminRewardEditor) {
@@ -1003,7 +1115,8 @@ window.addEventListener("DOMContentLoaded", () => {
   tickVisuals();
   $("train-btn").onclick = queueRun;
   $("report-save").onclick = saveReport;
-  $("admin-save").onclick = saveAdmin;
+  $("admin-save").onclick = () => saveAdmin(false);
+  $("admin-save-training")?.addEventListener("click", () => saveAdmin(true));
   $("final-btn").onclick = runFinal;
   $("post-replay-btn").onclick = () => lastDoneRunId && startRunReplay(lastDoneRunId, "post-replay-enemy", "post-replay-info", "post-replay", "post-replay-stop");
   $("post-replay-stop").onclick = () => stopRunReplay("post-replay-stop");
